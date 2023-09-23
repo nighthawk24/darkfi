@@ -1,0 +1,22 @@
+k = 13;
+field = "pallas";
+
+constant "Unlock" {}
+
+witness "Unlock" {
+	Base block_height,
+	Base user_data,
+	Base user_data_blind,
+}
+
+circuit "Unlock" {
+	range_check(64, user_data);
+	range_check(64, block_height);
+	constrain_instance(block_height);
+
+	# Enforce that the current block height is higher than the timelock
+	less_than_strict(user_data, block_height);
+
+	user_data_enc = poseidon_hash(user_data, user_data_blind);
+	constrain_instance(user_data_enc);
+}

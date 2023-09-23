@@ -42,14 +42,15 @@ use darkfi_money_contract::{
     MONEY_CONTRACT_ZKAS_TOKEN_MINT_NS_V1,
 };
 use darkfi_sdk::crypto::{
-    contract_id::DEPLOYOOOR_CONTRACT_ID, CONSENSUS_CONTRACT_ID, DAO_CONTRACT_ID, MONEY_CONTRACT_ID,
+    contract_id::{DEPLOYOOOR_CONTRACT_ID, TIMELOCK_CONTRACT_ID},
+    CONSENSUS_CONTRACT_ID, DAO_CONTRACT_ID, MONEY_CONTRACT_ID,
 };
 use darkfi_serial::{deserialize, serialize};
 use log::debug;
 
 /// Update this if any circuits are changed
-const VKS_HASH: &str = "f6b536bd601d6f0b709800da4cb46f026e3292be05eea1b407fab3146738c80e";
-const PKS_HASH: &str = "d0297ba167bae9d74a05f0a57b3e3985591d092d096939f71d3fea9ab11bc96f";
+const VKS_HASH: &str = "d40f9b1515fccbc42ec1494d8da6a164942ad0f1f0f6c7ee1645b62d281ffea5";
+const PKS_HASH: &str = "98c9f9b1478a5f858d4fee92b30ce63755392de439e2c92bf99e6e4000d37fd1";
 
 fn pks_path(typ: &str) -> Result<PathBuf> {
     let output = Command::new("git").arg("rev-parse").arg("--show-toplevel").output()?.stdout;
@@ -133,6 +134,8 @@ pub fn read_or_gen_vks_and_pks() -> Result<(Pks, Vks)> {
         &include_bytes!("../../consensus/proof/consensus_proposal_v1.zk.bin")[..],
         // Deployooor
         &include_bytes!("../../deployooor/proof/derive_contract_id.zk.bin")[..],
+        // Timelock
+        &include_bytes!("../../timelock/proof/unlock.zk.bin")[..],
     ];
 
     let mut vks = vec![];
@@ -186,6 +189,9 @@ pub fn inject(sled_db: &sled::Db, vks: &Vks) -> Result<()> {
         DEPLOYOOOR_CONTRACT_ID.hash_state_id(SMART_CONTRACT_ZKAS_DB_NAME);
     let deployooor_zkas_tree = sled_db.open_tree(deployooor_zkas_tree_ptr)?;
 
+    let timelock_zkas_tree_ptr = TIMELOCK_CONTRACT_ID.hash_state_id(SMART_CONTRACT_ZKAS_DB_NAME);
+    let timelock_zkas_tree = sled_db.open_tree(timelock_zkas_tree_ptr)?;
+
     for (bincode, namespace, vk) in vks.iter() {
         match namespace.as_str() {
             // Money circuits
@@ -224,6 +230,13 @@ pub fn inject(sled_db: &sled::Db, vks: &Vks) -> Result<()> {
                 let key = serialize(&namespace.as_str());
                 let value = serialize(&(bincode.clone(), vk.clone()));
                 consensus_zkas_tree.insert(key, value)?;
+            }
+
+            // Timelock circuits
+            "Unlock" => {
+                let key = serialize(&"Unlock");
+                let value = serialize(&(bincode.clone(), vk.clone()));
+                timelock_zkas_tree.insert(key, value)?;
             }
 
             x => panic!("Found unhandled zkas namespace {}", x),

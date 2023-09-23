@@ -49,6 +49,10 @@ lazy_static! {
     /// Contract ID for the native Deployooor contract
     pub static ref DEPLOYOOOR_CONTRACT_ID: ContractId =
         ContractId::from(poseidon_hash([*CONTRACT_ID_PREFIX, pallas::Base::zero(), pallas::Base::from(3)]));
+
+    /// Contract ID for the native Timelock contract
+    pub static ref TIMELOCK_CONTRACT_ID: ContractId =
+        ContractId::from(poseidon_hash([*CONTRACT_ID_PREFIX, pallas::Base::zero(), pallas::Base::from(4)]));
 }
 
 /// ContractId represents an on-chain identifier for a certain smart contract.

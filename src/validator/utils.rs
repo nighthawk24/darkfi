@@ -16,7 +16,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use darkfi_sdk::crypto::{PublicKey, CONSENSUS_CONTRACT_ID, DAO_CONTRACT_ID, MONEY_CONTRACT_ID};
+use darkfi_sdk::crypto::{
+    contract_id::TIMELOCK_CONTRACT_ID, PublicKey, CONSENSUS_CONTRACT_ID, DAO_CONTRACT_ID,
+    MONEY_CONTRACT_ID,
+};
 use darkfi_serial::serialize;
 use log::info;
 
@@ -51,6 +54,9 @@ pub fn deploy_native_contracts(
     // The Consensus contract uses an empty payload to deploy itself.
     let consensus_contract_deploy_payload = vec![];
 
+    // The Timelock contract uses an empty payload to deploy itself.
+    let timelock_contract_deploy_payload = vec![];
+
     let native_contracts = vec![
         (
             "Money Contract",
@@ -69,6 +75,12 @@ pub fn deploy_native_contracts(
             *CONSENSUS_CONTRACT_ID,
             include_bytes!("../contract/consensus/consensus_contract.wasm").to_vec(),
             consensus_contract_deploy_payload,
+        ),
+        (
+            "Timelock Contract",
+            *TIMELOCK_CONTRACT_ID,
+            include_bytes!("../contract/timelock/timelock_contract.wasm").to_vec(),
+            timelock_contract_deploy_payload,
         ),
     ];
 

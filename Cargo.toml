@@ -46,6 +46,7 @@ members = [
     "src/contract/dao",
     "src/contract/consensus",
     "src/contract/deployooor",
+    "src/contract/timelock",
 
     #"example/dchat",
 ]

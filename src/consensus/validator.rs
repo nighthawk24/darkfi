@@ -21,7 +21,9 @@ use std::{collections::HashMap, io::Cursor, sync::Arc};
 use darkfi_sdk::{
     blockchain::Slot,
     crypto::{
-        contract_id::{CONSENSUS_CONTRACT_ID, DAO_CONTRACT_ID, MONEY_CONTRACT_ID},
+        contract_id::{
+            CONSENSUS_CONTRACT_ID, DAO_CONTRACT_ID, MONEY_CONTRACT_ID, TIMELOCK_CONTRACT_ID,
+        },
         schnorr::{SchnorrPublic, SchnorrSecret},
         MerkleNode, MerkleTree, PublicKey, SecretKey,
     },
@@ -148,6 +150,7 @@ impl ValidatorState {
         let money_contract_deploy_payload = serialize(&faucet_pubkeys);
         let dao_contract_deploy_payload = vec![];
         let consensus_contract_deploy_payload = vec![];
+        let timelock_contract_deploy_payload = vec![];
 
         let native_contracts = vec![
             (
@@ -167,6 +170,12 @@ impl ValidatorState {
                 *CONSENSUS_CONTRACT_ID,
                 include_bytes!("../contract/consensus/consensus_contract.wasm").to_vec(),
                 consensus_contract_deploy_payload,
+            ),
+            (
+                "Timelock Contract",
+                *TIMELOCK_CONTRACT_ID,
+                include_bytes!("../contract/timelock/timelock_contract.wasm").to_vec(),
+                timelock_contract_deploy_payload,
             ),
         ];
 

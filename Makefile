@@ -42,6 +42,7 @@ contracts: zkas
 	$(MAKE) -C src/contract/dao
 	$(MAKE) -C src/contract/consensus
 	$(MAKE) -C src/contract/deployooor
+	$(MAKE) -C src/contract/timelock
 
 darkfid: $(PROOFS_BIN) contracts
 	$(MAKE) -C bin/darkfid
