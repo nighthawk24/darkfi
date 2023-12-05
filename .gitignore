@@ -36,3 +36,7 @@
 
 *.rusty-tags.emacs
 /tags
+
+/example/dchat/dchat
+/dchat
+
