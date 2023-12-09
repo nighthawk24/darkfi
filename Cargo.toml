@@ -48,7 +48,7 @@ members = [
     "src/contract/consensus",
     "src/contract/deployooor",
 
-    #"example/dchat",
+    "example/dchat",
 ]
 
 [dependencies]
