@@ -10,9 +10,10 @@ edition = "2021"
 
 # ANCHOR: dependencies
 [dependencies]
-# darkfi
+# ANCHOR: darkfi
 darkfi = {path = "../../../", features = ["net", "toml", "system", "async-daemonize", "rpc"]}
 darkfi-serial = {path = "../../../src/serial"}
+# ANCHOR_END: darkfi
 
 # daemon
 easy-parallel = "3.3.1"
