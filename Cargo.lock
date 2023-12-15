@@ -2153,6 +2153,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2e66c9d817f1720209181c316d28635c050fa304f9c79e47a520882661b7308"
 
 [[package]]
+name = "dchatd"
+version = "0.4.2"
+dependencies = [
+ "async-trait",
+ "darkfi",
+ "darkfi-serial",
+ "easy-parallel",
+ "log",
+ "serde",
+ "signal-hook",
+ "signal-hook-async-std",
+ "simplelog",
+ "smol",
+ "structopt",
+ "structopt-toml",
+ "url",
+]
+
+[[package]]
 name = "der"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
