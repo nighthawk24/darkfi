@@ -31,7 +31,7 @@ use crate::{
 };
 
 // Number of nodes to spawn and number of peers each node connects to
-const N_NODES: usize = 10;
+const N_NODES: usize = 2;
 const N_CONNS: usize = 2;
 
 // TODO: test whitelist propagation between peers
@@ -84,51 +84,41 @@ fn p2p_test() {
         });
 }
 
-async fn spawn_seed(ex: Arc<Executor<'static>>) {
-    let inbound_addrs = vec![Url::parse(&format!("tcp://127.0.0.1:{}", 51505)).unwrap()];
-    let settings = Settings {
-        localnet: true,
-        inbound_addrs: inbound_addrs.clone(),
-        outbound_connections: N_NODES,
-        outbound_connect_timeout: 2,
-        inbound_connections: usize::MAX,
-        peers: vec![],
-        allowed_transports: vec!["tcp".to_string()],
-        ..Default::default()
-    };
-
-    let p2p = P2p::new(settings, ex.clone()).await;
-    info!("Starting seed network node for on {:?}", inbound_addrs);
-    p2p.clone().start().await.unwrap();
-}
-
 async fn p2p_propagation_real(ex: Arc<Executor<'static>>) {
-    spawn_seed(ex.clone()).await;
+    let seed_addr = Url::parse(&format!("tcp://127.0.0.1:{}", 51505)).unwrap();
 
     let mut p2p_instances = vec![];
     let mut rng = rand::thread_rng();
 
-    // Initialize the nodes
-    for i in 0..N_NODES {
-        // Everyone will connect to N_CONNS random peers.
-        let mut peers = vec![];
-        for _ in 0..N_CONNS {
-            let mut port = 13200 + i;
-            while port == 13200 + i {
-                port = 13200 + rng.gen_range(0..N_NODES);
-            }
-            peers.push(Url::parse(&format!("tcp://127.0.0.1:{}", port)).unwrap());
-        }
+    info!("Initializing seed network");
+    let settings = Settings {
+        localnet: true,
+        inbound_addrs: vec![seed_addr.clone()],
+        outbound_connections: 0,
+        outbound_connect_timeout: 2,
+        inbound_connections: usize::MAX,
+        peers: vec![],
+        allowed_transports: vec!["tcp".to_string()],
+        advertise: true,
+        ..Default::default()
+    };
 
+    let p2p = P2p::new(settings, ex.clone()).await;
+    p2p_instances.push(p2p);
+
+    // Initialize outboun nodes
+    for i in 0..N_NODES {
         let settings = Settings {
             localnet: true,
             inbound_addrs: vec![Url::parse(&format!("tcp://127.0.0.1:{}", 13200 + i)).unwrap()],
-            outbound_connections: 5,
+            external_addrs: vec![Url::parse(&format!("tcp://127.0.0.1:{}", 13200 + i)).unwrap()],
+            outbound_connections: 2,
             outbound_connect_timeout: 2,
             inbound_connections: usize::MAX,
-            seeds: vec![Url::parse(&format!("tcp://127.0.0.1:{}", 51505)).unwrap()],
-            peers,
+            seeds: vec![seed_addr.clone()],
+            peers: vec![],
             allowed_transports: vec!["tcp".to_string()],
+            advertise: true,
             ..Default::default()
         };
 
@@ -137,23 +127,12 @@ async fn p2p_propagation_real(ex: Arc<Executor<'static>>) {
     }
     // Start the P2P network
     for p2p in p2p_instances.iter() {
+        assert!(p2p.settings().advertise == true);
         p2p.clone().start().await.unwrap();
     }
 
     info!("Waiting 10s until all peers connect");
     sleep(10).await;
-
-    // Check the greylist...
-    for p2p in p2p_instances.iter() {
-        let hosts = p2p.hosts();
-        info!("Whitelist {:?}", hosts.whitelist.read().await);
-        info!("Greylist {:?}", hosts.whitelist.read().await);
-
-        sleep(10).await;
-
-        info!("Whitelist {:?}", hosts.whitelist.read().await);
-        info!("Greylist {:?}", hosts.whitelist.read().await);
-    }
 
     // Stop the P2P network
     for p2p in p2p_instances.iter() {
