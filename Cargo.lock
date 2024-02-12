@@ -1871,6 +1871,7 @@ version = "0.4.1"
 dependencies = [
  "arti-client",
  "async-recursion",
+ "async-std",
  "async-trait",
  "blake3 1.5.0",
  "bs58",

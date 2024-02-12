@@ -16,6 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+// use core::slice::SlicePattern;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -23,9 +24,13 @@ use std::{
 };
 
 use async_recursion::async_recursion;
+use async_std::stream::from_iter;
+use blake3::Hash;
 use darkfi_serial::{deserialize_async, serialize_async};
+use futures::{future, StreamExt};
 use log::{debug, error, info};
 use num_bigint::BigUint;
+use rand::{seq::SliceRandom, thread_rng};
 use sled_overlay::SledTreeOverlay;
 use smol::{
     lock::{OnceCell, RwLock},
@@ -34,7 +39,7 @@ use smol::{
 
 use crate::{
     event_graph::util::seconds_until_next_rotation,
-    net::P2pPtr,
+    net::{channel::Channel, P2pPtr},
     system::{sleep, timeout::timeout, StoppableTask, StoppableTaskPtr, Subscriber, SubscriberPtr},
     Error, Result,
 };
@@ -289,110 +294,69 @@ impl EventGraph {
         let mut received_events_hashes = HashSet::new();
 
         while !missing_parents.is_empty() {
+            let mut missing_events: Vec<_> = missing_parents.clone().into_iter().collect();
+            let mut peers: Vec<_> = channels.clone().into_iter().collect();
+
+            let mut rng = thread_rng();
+            missing_events.shuffle(&mut rng);
+            peers.shuffle(&mut rng);
+
             let mut found_event = false;
 
-            for channel in channels.iter() {
-                let url = channel.address();
+            let peers = peers.as_slice();
+            let missing = missing_events.into_iter().collect::<Vec<_>>();
 
-                debug!(
-                    target: "event_graph::dag_sync()",
-                    "Requesting {:?} from {}...", missing_parents, url,
-                );
+            // for channel in channels.iter() {
+            let parents = send_requests(peers, &missing).await?.concat();
 
-                let multi_ev_rep_sub = match channel.subscribe_msg::<EventRep>().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!(
-                            target: "event_graph::dag_sync()",
-                            "[EVENTGRAPH] Sync: Couldn't subscribe EventRep for peer {}, skipping ({})",
-                            url, e,
-                        );
-                        continue
-                    }
-                };
-
-                let request_missing_events = missing_parents.clone().into_iter().collect();
-                if let Err(e) = channel.send(&EventReq(request_missing_events)).await {
+            for parent in parents {
+                let parent_id = parent.id();
+                if !missing.contains(&parent_id) {
                     error!(
                         target: "event_graph::dag_sync()",
-                        "[EVENTGRAPH] Sync: Failed communicating MultiEventReq({:?}) to {}: {}",
-                        missing_parents, url, e,
+                        "[EVENTGRAPH] Sync: replied with a wrong event: {}",
+                         parent.id(),
                     );
                     continue
                 }
 
-                let parent = match timeout(REPLY_TIMEOUT, multi_ev_rep_sub.receive()).await {
-                    Ok(parent) => parent,
-                    Err(_) => {
-                        error!(
-                            target: "event_graph::dag_sync()",
-                            "[EVENTGRAPH] Sync: Timeout waiting for parents {:?} from {}",
-                            missing_parents, url,
-                        );
-                        continue
-                    }
-                };
+                debug!(
+                    target: "event_graph::dag_sync()",
+                    "Got correct parent event {}", parent_id,
+                );
 
-                let parents = match parent {
-                    Ok(v) => v.0.clone(),
-                    Err(e) => {
-                        error!(
-                            target: "event_graph::dag_sync()",
-                            "[EVENTGRAPH] Sync: Failed receiving parents {:?}: {}",
-                            missing_parents, e,
-                        );
-                        continue
-                    }
-                };
+                if let Some(layer_events) = received_events.get_mut(&parent.layer) {
+                    layer_events.push(parent.clone());
+                } else {
+                    let layer_events = vec![parent.clone()];
+                    received_events.insert(parent.layer, layer_events);
+                }
+                received_events_hashes.insert(parent_id);
 
-                for parent in parents {
-                    let parent_id = parent.id();
-                    if !missing_parents.contains(&parent_id) {
-                        error!(
-                            target: "event_graph::dag_sync()",
-                            "[EVENTGRAPH] Sync: Peer {} replied with a wrong event: {}",
-                            url, parent.id(),
-                        );
+                missing_parents.remove(&parent_id);
+                found_event = true;
+
+                // See if we have the upper parents
+                for upper_parent in parent.parents.iter() {
+                    if upper_parent == &NULL_ID {
                         continue
                     }
 
-                    debug!(
-                        target: "event_graph::dag_sync()",
-                        "Got correct parent event {}", parent_id,
-                    );
-
-                    if let Some(layer_events) = received_events.get_mut(&parent.layer) {
-                        layer_events.push(parent.clone());
-                    } else {
-                        let layer_events = vec![parent.clone()];
-                        received_events.insert(parent.layer, layer_events);
-                    }
-                    received_events_hashes.insert(parent_id);
-
-                    missing_parents.remove(&parent_id);
-                    found_event = true;
-
-                    // See if we have the upper parents
-                    for upper_parent in parent.parents.iter() {
-                        if upper_parent == &NULL_ID {
-                            continue
-                        }
-
-                        if !missing_parents.contains(upper_parent) &&
-                            !received_events_hashes.contains(upper_parent) &&
-                            !self.dag.contains_key(upper_parent.as_bytes()).unwrap()
-                        {
-                            debug!(
-                                target: "event_graph::dag_sync()",
-                                "Found upper missing parent event{}", upper_parent,
-                            );
-                            missing_parents.insert(*upper_parent);
-                        }
+                    if !missing_parents.contains(upper_parent) &&
+                        !received_events_hashes.contains(upper_parent) &&
+                        !self.dag.contains_key(upper_parent.as_bytes()).unwrap()
+                    {
+                        debug!(
+                            target: "event_graph::dag_sync()",
+                            "Found upper missing parent event{}", upper_parent,
+                        );
+                        missing_parents.insert(*upper_parent);
                     }
                 }
-
-                break
             }
+
+            // break
+            // }
 
             if !found_event {
                 error!(
@@ -776,4 +740,74 @@ impl EventGraph {
 
         parents1 == parents2
     }
+}
+
+async fn send_request(peer: &Channel, missing: &[Hash]) -> Result<Vec<Event>> {
+    let url = peer.address();
+
+    debug!(
+        target: "event_graph::dag_sync()",
+        "Requesting {:?} from {}...", missing, url,
+    );
+
+    let ev_rep_sub = match peer.subscribe_msg::<EventRep>().await {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                target: "event_graph::dag_sync()",
+                "[EVENTGRAPH] Sync: Couldn't subscribe EventRep for peer {}, skipping ({})",
+                url, e,
+            );
+            return Err(Error::Custom("Couldn't subscribe EventRep".to_string()))
+        }
+    };
+
+    if let Err(e) = peer.send(&EventReq(missing.to_vec())).await {
+        error!(
+            target: "event_graph::dag_sync()",
+            "[EVENTGRAPH] Sync: Failed communicating EventReq({:?}) to {}: {}",
+            missing, url, e,
+        );
+        return Err(Error::Custom("Failed communicating EventReq".to_string()))
+    }
+
+    let parent = match timeout(REPLY_TIMEOUT, ev_rep_sub.receive()).await {
+        Ok(parent) => parent,
+        Err(_) => {
+            error!(
+                target: "event_graph::dag_sync()",
+                "[EVENTGRAPH] Sync: Timeout waiting for parents {:?} from {}",
+                missing, url,
+            );
+            return Err(().into())
+        }
+    };
+
+    let parents = match parent {
+        Ok(v) => v.0.clone(),
+        Err(e) => {
+            error!(
+                target: "event_graph::dag_sync()",
+                "[EVENTGRAPH] Sync: Failed receiving parents {:?}: {}",
+                missing, e,
+            );
+            return Err(().into())
+        }
+    };
+
+    Ok(parents)
+}
+
+// A function that sends requests to multiple peers concurrently
+async fn send_requests(peers: &[Arc<Channel>], missing: &[Hash]) -> Result<Vec<Vec<Event>>> {
+    let chunk_size = (missing.len() as f64 / peers.len() as f64).ceil() as usize;
+    let pairs = peers.iter().zip(missing.chunks(chunk_size)).collect::<Vec<_>>();
+
+    // For each peer, create a future that sends a request
+    let pair_stream = from_iter(pairs.iter());
+    let requests_stream = pair_stream.map(|(peer, missing)| send_request(peer, missing));
+    // Collect all the responses into a vector
+    let responses = requests_stream.collect::<Vec<_>>().await;
+    // Wait for all the futures to complete
+    future::try_join_all(responses).await
 }
