@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GREYLIST_MAX_LEN","LOCAL_HOST_STRS","WHITELIST_MAX_LEN"],"struct":["Hosts"],"type":["HostsPtr"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["generate_next_block","generate_transaction","listen_to_network","mine_next_block","miner_task"]};

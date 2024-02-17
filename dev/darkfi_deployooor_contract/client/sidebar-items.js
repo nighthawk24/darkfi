@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_derive_contractid_proof"],"mod":["deploy_v1","lock_v1"],"struct":["DeriveContractIdRevealed"]};

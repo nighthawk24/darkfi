@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"dchatd":[["impl <a class=\"trait\" href=\"darkfi/rpc/p2p_method/trait.HandlerP2p.html\" title=\"trait darkfi::rpc::p2p_method::HandlerP2p\">HandlerP2p</a> for <a class=\"struct\" href=\"dchatd/struct.Dchat.html\" title=\"struct dchatd::Dchat\">Dchat</a>"]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
