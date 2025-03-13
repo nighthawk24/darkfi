@@ -5,18 +5,17 @@ The DarkFi Blockchain Explorer facilitates the exploration of chain data and int
 ## Table of Contents
 1. [Key Features](#key-features)
 2. [Network Status](#network-status)
-3. [Prerequisites](#prerequisites)
-4. [Quick Start Guide](#quick-start-guide)
+3. [Quick Start Guide](#quick-start-guide)
 
-5. [Explorer Components](#explorer-components)
+4. [Explorer Components](#explorer-components)
     - [Explorer Nodes](#explorer-nodes)
     - [Explorer Site](#explorer-site)
 
-6. [Configuration](#configuration)
+5. [Configuration](#configuration)
     - [Configuration Files](#configuration-files)
     - [Supported Networks](#supported-networks)
 
-7. [Feature Details](#feature-details)
+6. [Feature Details](#feature-details)
     - [Home Page Overview](#home-page-overview)
     - [Block and Transaction Exploration](#block-and-transaction-exploration)
     - [Gas Analytics](#gas-analytics)
@@ -37,18 +36,29 @@ The testnet and mainnet configurations serve as placeholders in preparation for 
 
 In addition, testnet and mainnet configurations are currently using development servers for the site and work is ongoing for production-like setups.
 
-## Prerequisites
-Before you begin, ensure you have the following installed and configured:
-- **Rust 1.86 or later**: For building and running the explorer daemon (`explorerd`).
-- **Make**: To start and stop explorer environments using make
-- **Python 3.12**: Required for running the Explorer Site (`site`).
-- **Darkfi Project Dependencies**: Dependencies required to compile the Darkfi code. For more details, see [Darkfi Build Dependencies](../../README.md#build).
-- **Darkfid**: Required for running DarkFi blockchain nodes on respective networks. The make commands build the binary from source code in `../darkfid` (if not already built in project root) and apply the appropriate network configuration.
-- **Minerd**: Needed for setups where Darkfid is configured with a miner JSON-RPC endpoint, but the configured miner is not running on the desired network. The make commands build the binary from source code in `../minerd` (if not already built in project root) and apply the appropriate network configuration.
-
 ## Quick Start Guide
 
-Run the following to get explorer environments running, including explorer nodes and site to view blocks on the respective Darkfid configured networks. These commands will automatically install dependencies, configure your environment, and start all necessary components.
+The DarkFi Explorer provides a visual interface to explore blockchains on DarkFi networks. Follow the steps below to launch explorer environments for your desired Darkfi blockchain network. 
+
+### Prerequisites
+Before you begin, ensure you have the following installed and configured:
+- **Rust 1.86 or later**: Required for building components written in Rust (like `darkfid`, `minerd`, `explorerd`)
+- **Python 3.12**: Required for building and running the Explorer Site (`site`).
+- **Darkfi Project Dependencies**: System dependencies required to compile Darkfi code. For details, see [Darkfi Build Dependencies](../../README.md#build).
+
+**About Darkfid and Minerd**:
+- **Darkfid**: Required for running DarkFi blockchain nodes on respective networks.
+- **Minerd**: Needed for setups where Darkfid is configured with a miner JSON-RPC endpoint, but the configured miner is not running on the desired network.
+
+When using the provided `make` commands used in the [Quick Start Guide](#quick-start-guide):
+- The commands automatically build Darkfid and Minerd from source code expected at `../darkfid` and `../minerd` (relative to this directory)
+- Additionally, the explorer daemon (`explorerd`) and site are built from the local `./explorerd` and `./site` directories
+- All components must be configured with appropriate network settings for the respective DarkFi blockchain network
+
+For manual execution:
+- Manual building and configuration of Darkfid, Minerd, the explorer daemon, and the Explorer Site is required
+- All components must be configured with compatible network settings
+- Respective documentation should be consulted when running manually
 
 ### Start Localnet Explorer Environment
 
@@ -72,6 +82,42 @@ make start-mainnet
 ```
 
 > Once started, navigate to http://127.0.0.1:5000 in your browser to access the explorer interface.
+
+### Confirming Successful Start
+
+Upon successful initialization of the Explorer environment, confirmation messages will appear in the startup logs. If these logs are not visible, the Explorer environment is still initializing. Allow sufficient time for the initialization process to complete before accessing the block explorer.
+
+```
+07:09:22 [INFO] ========================================================================================
+07:09:22 [INFO]                    Started DarkFi Explorer Node                                        
+07:09:22 [INFO] ========================================================================================
+07:09:22 [INFO]   - Network: localnet                                 
+07:09:22 [INFO]   - JSON-RPC Endpoint: tcp://127.0.0.1:14567          
+07:09:22 [INFO]   - Database: ~/.local/share/darkfi/explorerd/localnet
+07:09:22 [INFO]   - Configuration: ./explorerd_config.toml
+07:09:22 [INFO]   - Reset Blocks: No
+07:09:22 [INFO] ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+07:09:22 [INFO]   - Synced Blocks: 9                                  
+07:09:22 [INFO]   - Synced Transactions: 9                            
+07:09:22 [INFO]   - Connected Darkfi Node: tcp://127.0.0.1:8240       
+07:09:22 [INFO] ========================================================================================
+07:09:22 [INFO] All is good. Waiting for block notifications...
+Started explorer site on localnet network (PID=31911)
+Started localnet environment. Press Ctrl-C to stop.
+```
+
+> Localnet explorer site logs appear directly in the console, while testnet and mainnet logs are written to `~/.local/share/darkfi/explorer_site/{network}/app.log`. For non-localnet environments, the console displays: `See site logfile /home/user/.local/share/darkfi/explorer_site/{network}/app.log for server startup details`.
+
+The explorer site log contains the following statup details.
+```
+============================================================
+Started Explorer Site
+============================================================
+Network: localnet
+Explorer Node Endpoint: 127.0.0.1:14567
+Log Path: ~/.local/share/darkfi/explorer_site/localnet
+============================================================
+```
 
 ### Stopping the Explorer Environment
 
