@@ -17,6 +17,8 @@
  */
 
 use std::{
+    fmt::{self, Debug, Formatter},
+    fs::remove_dir_all,
     io::{self, ErrorKind},
     pin::Pin,
     sync::Arc,
@@ -53,15 +55,58 @@ use crate::util::path::expand_path;
 static TOR_CLIENT: OnceCell<TorClient<PreferredRuntime>> = OnceCell::new();
 
 /// Tor Dialer implementation
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TorDialer {
-    datastore: Option<String>,
+    client: TorClient<PreferredRuntime>,
+}
+
+impl Debug for TorDialer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        writeln!(f, "TorDialer {{ TorClient }}")
+    }
 }
 
 impl TorDialer {
     /// Instantiate a new [`TorDialer`] object
     pub(crate) async fn new(datastore: Option<String>) -> io::Result<Self> {
-        Ok(Self { datastore })
+        // Initialize or fetch the static TOR_CLIENT that should be reused in
+        // the Tor dialer
+        let client = match TOR_CLIENT
+            .get_or_try_init(|| async {
+                debug!(target: "net::tor::TorDialer", "Bootstrapping...");
+                if let Some(datadir) = &datastore {
+                    let datadir = expand_path(datadir).unwrap();
+                    let arti_data = datadir.join("arti-data");
+                    let arti_cache = datadir.join("arti-cache");
+
+                    // Reset arti folders.
+                    // We unwrap here so we panic in case of errors.
+                    if arti_data.exists() {
+                        remove_dir_all(&arti_data).unwrap();
+                    }
+                    if arti_cache.exists() {
+                        remove_dir_all(&arti_cache).unwrap();
+                    }
+
+                    let config = TorClientConfigBuilder::from_directories(arti_data, arti_cache)
+                        .build()
+                        .unwrap();
+
+                    TorClient::create_bootstrapped(config).await
+                } else {
+                    TorClient::builder().create_bootstrapped().await
+                }
+            })
+            .await
+        {
+            Ok(client) => client.isolated_client(),
+            Err(e) => {
+                warn!(target: "net::tor::TorDialer", "{}", e.report());
+                return Err(io::Error::other("Internal Tor error, see logged warning"))
+            }
+        };
+
+        Ok(Self { client })
     }
 
     /// Internal dial function
@@ -73,41 +118,12 @@ impl TorDialer {
     ) -> io::Result<DataStream> {
         debug!(target: "net::tor::do_dial", "Dialing {}:{} with Tor...", host, port);
 
-        // Initialize or fetch the static TOR_CLIENT that should be reused in
-        // the Tor dialer
-        let client = match TOR_CLIENT
-            .get_or_try_init(|| async {
-                debug!(target: "net::tor::do_dial", "Bootstrapping...");
-                if let Some(datadir) = &self.datastore {
-                    let datadir = expand_path(datadir).unwrap();
-
-                    let config = TorClientConfigBuilder::from_directories(
-                        datadir.join("arti-data"),
-                        datadir.join("arti-cache"),
-                    )
-                    .build()
-                    .unwrap();
-
-                    TorClient::create_bootstrapped(config).await
-                } else {
-                    TorClient::builder().create_bootstrapped().await
-                }
-            })
-            .await
-        {
-            Ok(client) => client,
-            Err(e) => {
-                warn!("{}", e.report());
-                return Err(io::Error::other("Internal Tor error, see logged warning"))
-            }
-        };
-
         let mut stream_prefs = StreamPrefs::new();
         stream_prefs.connect_to_onion_services(BoolOrAuto::Explicit(true));
 
         // If a timeout is configured, run both the connect and timeout futures
         // and return whatever finishes first. Otherwise, wait on the connect future.
-        let connect = client.connect_with_prefs((host, port), &stream_prefs);
+        let connect = self.client.connect_with_prefs((host, port), &stream_prefs);
 
         match conn_timeout {
             Some(t) => {
@@ -119,7 +135,7 @@ impl TorDialer {
                     Either::Left((Ok(stream), _)) => Ok(stream),
 
                     Either::Left((Err(e), _)) => {
-                        warn!("{}", e.report());
+                        warn!(target: "net::tor::do_dial", "{}", e.report());
                         Err(io::Error::other("Internal Tor error, see logged warning"))
                     }
 
@@ -135,7 +151,7 @@ impl TorDialer {
                         // from arti-client in order to help debug Tor connections.
                         // https://docs.rs/arti-client/latest/arti_client/#reporting-arti-errors
                         // https://gitlab.torproject.org/tpo/core/arti/-/issues/1086
-                        warn!("{}", e.report());
+                        warn!(target: "net::tor::do_dial", "{}", e.report());
                         Err(io::Error::other("Internal Tor error, see logged warning"))
                     }
                 }
@@ -180,7 +196,7 @@ impl TorListener {
         {
             Ok(client) => client,
             Err(e) => {
-                warn!("{}", e.report());
+                warn!(target: "net::tor::do_listen", "{}", e.report());
                 return Err(io::Error::other("Internal Tor error, see logged warning"))
             }
         };
