@@ -795,6 +795,7 @@ impl Circuit<pallas::Base> for ZkCircuit {
         // =============================
         // And now, work through opcodes
         // =============================
+        assert!(!self.tracer.is_enabled, "ZkTracer is already enabled before synthesis. This indicates a potential logic error in tracer lifecycle management.");
         self.tracer.clear();
         // TODO: Copy constraints
         // ANCHOR: opcode_begin
