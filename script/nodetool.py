@@ -75,17 +75,28 @@ class JsonRpc:
 
 async def main(argv):
     rpc = JsonRpc()
-    while True:
+    max_retries = 5
+    retries = 0
+    while retries < max_retries:
         try:
             await rpc.start("localhost", 26660)
-            break
+            break  # Exit loop if connection successful
         except OSError:
-            pass
+            retries += 1
+            if retries < max_retries:
+                print(f"Connection attempt {retries} failed. Retrying in 3 seconds...")
+                time.sleep(3)
+            else:
+                print("Failed to connect to localhost:26660 after 5 attempts. Exiting.")
+                sys.exit(1)
     await rpc.dnet_switch(True)
     await rpc.dnet_subscribe_events()
 
     while True:
         data = await rpc.reader.readline()
+        if not data:
+            print("Connection closed by server. Exiting.")
+            sys.exit(0)
         #with open("rpclog", "a") as f:
         #    f.write(data.decode())
         data = json.loads(data)
