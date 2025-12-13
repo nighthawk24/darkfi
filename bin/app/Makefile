@@ -36,8 +36,18 @@ ios-release: $(SRC) fonts forest_720x1280
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
 	# Build for iOS device (aarch64)
-	export IPHONEOS_DEPLOYMENT_TARGET=14.0 && \
-	export SDKROOT=$$(xcrun --sdk iphoneos --show-sdk-path) && \
+	SDKROOT=$$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null); \
+	if [ -z "$$SDKROOT" ]; then \
+		SDKROOT=$$(xcodebuild -version -sdk iphoneos Path 2>/dev/null); \
+	fi; \
+	if [ -z "$$SDKROOT" ]; then \
+		echo "ERROR: Could not find iphoneos SDK."; \
+		echo "Current xcode-select path: $$(xcode-select -p)"; \
+		echo "Ensure Xcode is installed and selected: sudo xcode-select -s /Applications/Xcode.app"; \
+		exit 1; \
+	fi; \
+	export SDKROOT=$$SDKROOT; \
+	export IPHONEOS_DEPLOYMENT_TARGET=14.0; \
 	cargo build --target aarch64-apple-ios --release $(RELEASE_FEATURES)
 	# Copy the binary
 	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
@@ -53,8 +63,18 @@ ios-sim: $(SRC) fonts forest_720x1280
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
 	# Build for iOS simulator (x86_64) - Modify to aarch64-apple-ios-sim if M1/M2 simulator needed
-	export IPHONEOS_DEPLOYMENT_TARGET=14.0 && \
-	export SDKROOT=$$(xcrun --sdk iphonesimulator --show-sdk-path) && \
+	SDKROOT=$$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null); \
+	if [ -z "$$SDKROOT" ]; then \
+		SDKROOT=$$(xcodebuild -version -sdk iphonesimulator Path 2>/dev/null); \
+	fi; \
+	if [ -z "$$SDKROOT" ]; then \
+		echo "ERROR: Could not find iphonesimulator SDK."; \
+		echo "Current xcode-select path: $$(xcode-select -p)"; \
+		echo "Ensure Xcode is installed and selected: sudo xcode-select -s /Applications/Xcode.app"; \
+		exit 1; \
+	fi; \
+	export SDKROOT=$$SDKROOT; \
+	export IPHONEOS_DEPLOYMENT_TARGET=14.0; \
 	cargo build --target x86_64-apple-ios --release $(RELEASE_FEATURES)
 	# Copy the binary
 	cp target/x86_64-apple-ios/release/darkfi-app DarkFi.app/
