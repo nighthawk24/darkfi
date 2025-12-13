@@ -31,6 +31,73 @@ android: android-release
 
 # Platform release builds
 
+ios-release: $(SRC) fonts forest_720x1280
+	# Create the app bundle structure
+	rm -rf DarkFi.app
+	mkdir -p DarkFi.app
+	# Build for iOS device (aarch64)
+	SDKROOT=$$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null); \
+	if [ -z "$$SDKROOT" ]; then \
+		SDKROOT=$$(xcodebuild -version -sdk iphoneos Path 2>/dev/null); \
+	fi; \
+	if [ -z "$$SDKROOT" ]; then \
+		echo "ERROR: Could not find iphoneos SDK."; \
+		echo "Current xcode-select path: $$(xcode-select -p)"; \
+		echo "Ensure Xcode is installed and selected: sudo xcode-select -s /Applications/Xcode.app"; \
+		exit 1; \
+	fi; \
+	export SDKROOT=$$SDKROOT; \
+	export IPHONEOS_DEPLOYMENT_TARGET=14.0; \
+	cargo build --target aarch64-apple-ios --release $(RELEASE_FEATURES)
+	# Copy the binary
+	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
+	# Copy resources
+	cp ios-Info.plist DarkFi.app/Info.plist
+	cp -r assets DarkFi.app/
+	# Create a dummy PkgInfo (optional but good practice)
+	echo "APPL????" > DarkFi.app/PkgInfo
+	@echo "DarkFi.app built for device (aarch64)."
+
+ios-sim: $(SRC) fonts forest_720x1280
+	# Create the app bundle structure
+	rm -rf DarkFi.app
+	mkdir -p DarkFi.app
+	# Build for iOS simulator (x86_64) - Modify to aarch64-apple-ios-sim if M1/M2 simulator needed
+	SDKROOT=$$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null); \
+	if [ -z "$$SDKROOT" ]; then \
+		SDKROOT=$$(xcodebuild -version -sdk iphonesimulator Path 2>/dev/null); \
+	fi; \
+	if [ -z "$$SDKROOT" ]; then \
+		echo "ERROR: Could not find iphonesimulator SDK."; \
+		echo "Current xcode-select path: $$(xcode-select -p)"; \
+		echo "Ensure Xcode is installed and selected: sudo xcode-select -s /Applications/Xcode.app"; \
+		exit 1; \
+	fi; \
+	export SDKROOT=$$SDKROOT; \
+	export IPHONEOS_DEPLOYMENT_TARGET=14.0; \
+	cargo build --target x86_64-apple-ios --release $(RELEASE_FEATURES)
+	# Copy the binary
+	cp target/x86_64-apple-ios/release/darkfi-app DarkFi.app/
+	# Copy resources
+	cp ios-Info.plist DarkFi.app/Info.plist
+	cp -r assets DarkFi.app/
+	echo "APPL????" > DarkFi.app/PkgInfo
+	@echo "DarkFi.app built for simulator (x86_64)."
+
+ios-xcode:
+	rm -rf DarkFi.xcodeproj
+	mkdir -p DarkFi.xcodeproj
+	# Generate unique IDs for the project file (24 chars)
+	sed -e "s/CONFIG_LIST_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    -e "s/MAIN_GROUP_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    -e "s/LEGACY_TARGET_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    -e "s/PROJECT_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    -e "s/PROJECT_CONFIG_LIST_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    -e "s/DEBUG_CONFIG_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    -e "s/RELEASE_CONFIG_ID/$$(uuidgen | tr -d - | tr '[:lower:]' '[:upper:]' | cut -c 1-24)/g" \
+	    project.pbxproj.template > DarkFi.xcodeproj/project.pbxproj
+	@echo "Generated DarkFi.xcodeproj. Open it in Xcode and ensure the 'External Build Tool' configuration points to 'make' and target 'ios-release' in this directory."
+
 macos-release: build-release
 	-mv darkfi-app darkfi-app.macos
 macos-debug: build-debug
