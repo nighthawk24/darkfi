@@ -36,6 +36,8 @@ ios-release: $(SRC) fonts forest_720x1280
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
 	# Build for iOS device (aarch64)
+	export IPHONEOS_DEPLOYMENT_TARGET=14.0 && \
+	export SDKROOT=$$(xcrun --sdk iphoneos --show-sdk-path) && \
 	cargo build --target aarch64-apple-ios --release $(RELEASE_FEATURES)
 	# Copy the binary
 	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
@@ -51,6 +53,8 @@ ios-sim: $(SRC) fonts forest_720x1280
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
 	# Build for iOS simulator (x86_64) - Modify to aarch64-apple-ios-sim if M1/M2 simulator needed
+	export IPHONEOS_DEPLOYMENT_TARGET=14.0 && \
+	export SDKROOT=$$(xcrun --sdk iphonesimulator --show-sdk-path) && \
 	cargo build --target x86_64-apple-ios --release $(RELEASE_FEATURES)
 	# Copy the binary
 	cp target/x86_64-apple-ios/release/darkfi-app DarkFi.app/
