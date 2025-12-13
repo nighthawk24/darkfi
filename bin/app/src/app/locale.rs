@@ -23,7 +23,7 @@ mod ui_consts {
     pub const LOCALE_PATH: &str = "lang/{locale}/{entry}";
 }
 #[cfg(all(
-    any(target_os = "linux", target_os = "macos", target_os = "windows"),
+    any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "ios"),
     not(feature = "emulate-android")
 ))]
 mod ui_consts {
