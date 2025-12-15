@@ -53,8 +53,7 @@ ios-release: $(SRC) fonts forest_720x1280
 	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
-	cp -r assets/* DarkFi.app/
-	cp -r assets/forest_720x1280 DarkFi.app/
+	cp -r assets DarkFi.app/
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
 	# Sign the app bundle with entitlements
@@ -92,8 +91,7 @@ ios-sim: $(SRC) fonts forest_720x1280
 	fi
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
-	cp -r assets/* DarkFi.app/
-	cp -r assets/forest_720x1280 DarkFi.app/
+	cp -r assets DarkFi.app/
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
 	# Sign the app bundle with entitlements
