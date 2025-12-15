@@ -57,6 +57,8 @@ ios-release: $(SRC) fonts forest_720x1280
 	cp -r assets/forest_720x1280 DarkFi.app/
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
+	# Sign the app bundle with entitlements
+	codesign --force --sign - --entitlements DarkFi.entitlements --timestamp=none DarkFi.app
 	# Create a dummy PkgInfo (optional but good practice)
 	echo "APPL????" > DarkFi.app/PkgInfo
 	@echo "DarkFi.app built for device (aarch64)."
@@ -94,6 +96,8 @@ ios-sim: $(SRC) fonts forest_720x1280
 	cp -r assets/forest_720x1280 DarkFi.app/
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
+	# Sign the app bundle with entitlements
+	codesign --force --sign - --entitlements DarkFi.entitlements --timestamp=none DarkFi.app
 	echo "APPL????" > DarkFi.app/PkgInfo
 	@echo "DarkFi.app built for simulator."
 
