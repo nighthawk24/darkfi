@@ -194,6 +194,9 @@ fmt:
 
 clean:
 	podman run -v $(shell pwd):/root/dw -w /root/dw -t apk rm -fr target/
+	rm -fr target/
 	rm -f darkfi-app.apk
+	rm -rf DarkFi.app
+	rm -rf DarkFi.xcodeproj
 
 .PHONY: all android cli clean
