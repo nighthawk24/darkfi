@@ -53,7 +53,10 @@ ios-release: $(SRC) fonts forest_720x1280
 	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
-	cp -r assets DarkFi.app/
+	cp -r assets/* DarkFi.app/
+	cp -r assets/forest_720x1280 DarkFi.app/
+	cp ibm-plex-mono-regular.otf DarkFi.app/
+	cp NotoColorEmoji.ttf DarkFi.app/
 	# Create a dummy PkgInfo (optional but good practice)
 	echo "APPL????" > DarkFi.app/PkgInfo
 	@echo "DarkFi.app built for device (aarch64)."
@@ -62,7 +65,7 @@ ios-sim: $(SRC) fonts forest_720x1280
 	# Create the app bundle structure
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
-	# Build for iOS simulator (x86_64) - Modify to aarch64-apple-ios-sim if M1/M2 simulator needed
+	# Build for iOS simulator (Detect Arch)
 	SDKROOT=$$(xcrun --sdk iphonesimulator --show-sdk-path 2>/dev/null); \
 	if [ -z "$$SDKROOT" ]; then \
 		SDKROOT=$$(xcodebuild -version -sdk iphonesimulator Path 2>/dev/null); \
@@ -75,14 +78,24 @@ ios-sim: $(SRC) fonts forest_720x1280
 	fi; \
 	export SDKROOT=$$SDKROOT; \
 	export IPHONEOS_DEPLOYMENT_TARGET=14.0; \
-	cargo build --target x86_64-apple-ios --release $(RELEASE_FEATURES)
-	# Copy the binary
-	cp target/x86_64-apple-ios/release/darkfi-app DarkFi.app/
+	ARCH=$$(uname -m); \
+	if [ "$$ARCH" = "arm64" ]; then \
+		echo "Detected Apple Silicon (arm64). Building for aarch64-apple-ios-sim..."; \
+		cargo build --target aarch64-apple-ios-sim --release $(RELEASE_FEATURES); \
+		cp target/aarch64-apple-ios-sim/release/darkfi-app DarkFi.app/; \
+	else \
+		echo "Detected Intel (x86_64). Building for x86_64-apple-ios..."; \
+		cargo build --target x86_64-apple-ios --release $(RELEASE_FEATURES); \
+		cp target/x86_64-apple-ios/release/darkfi-app DarkFi.app/; \
+	fi
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
-	cp -r assets DarkFi.app/
+	cp -r assets/* DarkFi.app/
+	cp -r assets/forest_720x1280 DarkFi.app/
+	cp ibm-plex-mono-regular.otf DarkFi.app/
+	cp NotoColorEmoji.ttf DarkFi.app/
 	echo "APPL????" > DarkFi.app/PkgInfo
-	@echo "DarkFi.app built for simulator (x86_64)."
+	@echo "DarkFi.app built for simulator."
 
 ios-xcode:
 	rm -rf DarkFi.xcodeproj

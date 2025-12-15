@@ -23,11 +23,16 @@ mod ui_consts {
     pub const LOCALE_PATH: &str = "lang/{locale}/{entry}";
 }
 #[cfg(all(
-    any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "ios"),
+    any(target_os = "linux", target_os = "macos", target_os = "windows"),
     not(feature = "emulate-android")
 ))]
 mod ui_consts {
     pub const LOCALE_PATH: &str = "assets/lang/{locale}/{entry}";
+}
+
+#[cfg(target_os = "ios")]
+mod ui_consts {
+    pub const LOCALE_PATH: &str = "lang/{locale}/{entry}";
 }
 
 pub use ui_consts::*;
