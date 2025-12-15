@@ -81,12 +81,12 @@ mod ui_consts {
 mod ui_consts {
     use std::path::PathBuf;
 
-    pub const VID_PATH: &str = "forest_720x1280/{frame}.qoi";
+    pub const VID_PATH: &str = "assets/forest_720x1280/{frame}.qoi";
     pub const VID_ASPECT_RATIO: f32 = 9. / 16.;
     pub use super::android_ui_consts::*;
 
     pub fn get_chatdb_path() -> PathBuf {
-        let path = dirs::document_dir().unwrap().join("darkfi/app/chatdb");
+        let path = dirs::data_local_dir().unwrap().join("darkfi/app/chatdb");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -94,7 +94,7 @@ mod ui_consts {
     }
 
     pub fn get_first_time_filename() -> PathBuf {
-        let path = dirs::document_dir().unwrap().join("darkfi/app/first_time");
+        let path = dirs::data_local_dir().unwrap().join("darkfi/app/first_time");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -102,7 +102,7 @@ mod ui_consts {
     }
 
     pub fn get_window_scale_filename() -> PathBuf {
-        let path = dirs::document_dir().unwrap().join("darkfi/app/window_scale");
+        let path = dirs::data_local_dir().unwrap().join("darkfi/app/window_scale");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -110,7 +110,7 @@ mod ui_consts {
     }
 
     pub fn get_settingsdb_path() -> PathBuf {
-        let path = dirs::document_dir().unwrap().join("darkfi/app/settings");
+        let path = dirs::data_local_dir().unwrap().join("darkfi/app/settings");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
