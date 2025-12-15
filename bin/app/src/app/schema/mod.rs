@@ -86,7 +86,8 @@ mod ui_consts {
     pub use super::android_ui_consts::*;
 
     pub fn get_chatdb_path() -> PathBuf {
-        let path = dirs::data_local_dir().unwrap().join("darkfi/app/chatdb");
+        let home = std::env::var("HOME").unwrap();
+        let path = PathBuf::from(home).join("Documents/darkfi/app/chatdb");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -94,7 +95,8 @@ mod ui_consts {
     }
 
     pub fn get_first_time_filename() -> PathBuf {
-        let path = dirs::data_local_dir().unwrap().join("darkfi/app/first_time");
+        let home = std::env::var("HOME").unwrap();
+        let path = PathBuf::from(home).join("Documents/darkfi/app/first_time");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -102,7 +104,8 @@ mod ui_consts {
     }
 
     pub fn get_window_scale_filename() -> PathBuf {
-        let path = dirs::data_local_dir().unwrap().join("darkfi/app/window_scale");
+        let home = std::env::var("HOME").unwrap();
+        let path = PathBuf::from(home).join("Documents/darkfi/app/window_scale");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -110,7 +113,8 @@ mod ui_consts {
     }
 
     pub fn get_settingsdb_path() -> PathBuf {
-        let path = dirs::data_local_dir().unwrap().join("darkfi/app/settings");
+        let home = std::env::var("HOME").unwrap();
+        let path = PathBuf::from(home).join("Documents/darkfi/app/settings");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
