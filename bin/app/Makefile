@@ -31,7 +31,7 @@ android: android-release
 
 # Platform release builds
 
-ios-release: $(SRC) fonts forest_720x1280
+ios-release: $(SRC) fonts forest_720x1280 forest_1920x1080
 	# Create the app bundle structure
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
@@ -53,10 +53,14 @@ ios-release: $(SRC) fonts forest_720x1280
 	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
+	# Copy to root (legacy/code path expectation)
+	cp -r assets/lang DarkFi.app/
+	cp -r assets/forest_720x1280 DarkFi.app/
+	cp -r assets/forest_1920x1080 DarkFi.app/
+	cp assets/*.png DarkFi.app/ || true
+	# Copy to assets folder (miniquad/macroquad default expectation)
 	mkdir -p DarkFi.app/assets
-	cp -r assets/lang DarkFi.app/assets/
-	cp -r assets/forest_720x1280 DarkFi.app/assets/
-	cp assets/*.png DarkFi.app/assets/ || true
+	cp -r assets/* DarkFi.app/assets/
 	cp embedded.mobileprovision DarkFi.app/ || echo "Warning: No provisioning profile found. Device builds will fail to launch."
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
@@ -66,7 +70,7 @@ ios-release: $(SRC) fonts forest_720x1280
 	echo "APPL????" > DarkFi.app/PkgInfo
 	@echo "DarkFi.app built for device (aarch64)."
 
-ios-sim: $(SRC) fonts forest_720x1280
+ios-sim: $(SRC) fonts forest_720x1280 forest_1920x1080
 	# Create the app bundle structure
 	rm -rf DarkFi.app
 	mkdir -p DarkFi.app
@@ -95,10 +99,14 @@ ios-sim: $(SRC) fonts forest_720x1280
 	fi
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
+	# Copy to root (legacy/code path expectation)
+	cp -r assets/lang DarkFi.app/
+	cp -r assets/forest_720x1280 DarkFi.app/
+	cp -r assets/forest_1920x1080 DarkFi.app/
+	cp assets/*.png DarkFi.app/ || true
+	# Copy to assets folder (miniquad/macroquad default expectation)
 	mkdir -p DarkFi.app/assets
-	cp -r assets/lang DarkFi.app/assets/
-	cp -r assets/forest_720x1280 DarkFi.app/assets/
-	cp assets/*.png DarkFi.app/assets/ || true
+	cp -r assets/* DarkFi.app/assets/
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
 	# Sign the app bundle with entitlements
@@ -163,14 +171,14 @@ forest_1920x1080.zip:
 assets/forest_1920x1080/000.qoi:
 	cd assets && unzip ../forest_1920x1080.zip
 forest_1920x1080: forest_1920x1080.zip assets/forest_1920x1080/000.qoi
-	rm -fr assets/forest_729x1280/
+	# rm -fr assets/forest_729x1280/
 
 forest_720x1280.zip:
 	wget -c https://codeberg.org/darkrenaissance/darkfi/raw/branch/data/forest_720x1280.zip
 assets/forest_720x1280/000.qoi:
 	cd assets && unzip ../forest_720x1280.zip
 forest_720x1280: forest_720x1280.zip assets/forest_720x1280/000.qoi
-	rm -fr assets/forest_1920x1080/
+	# rm -fr assets/forest_1920x1080/
 
 # Developer targets
 
