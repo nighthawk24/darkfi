@@ -53,9 +53,10 @@ ios-release: $(SRC) fonts forest_720x1280
 	cp target/aarch64-apple-ios/release/darkfi-app DarkFi.app/
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
-	cp -r assets/lang DarkFi.app/
-	cp -r assets/forest_720x1280 DarkFi.app/
-	cp assets/*.png DarkFi.app/ || true
+	mkdir -p DarkFi.app/assets
+	cp -r assets/lang DarkFi.app/assets/
+	cp -r assets/forest_720x1280 DarkFi.app/assets/
+	cp assets/*.png DarkFi.app/assets/ || true
 	cp embedded.mobileprovision DarkFi.app/ || echo "Warning: No provisioning profile found. Device builds will fail to launch."
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
@@ -94,9 +95,10 @@ ios-sim: $(SRC) fonts forest_720x1280
 	fi
 	# Copy resources
 	cp ios-Info.plist DarkFi.app/Info.plist
-	cp -r assets/lang DarkFi.app/
-	cp -r assets/forest_720x1280 DarkFi.app/
-	cp assets/*.png DarkFi.app/ || true
+	mkdir -p DarkFi.app/assets
+	cp -r assets/lang DarkFi.app/assets/
+	cp -r assets/forest_720x1280 DarkFi.app/assets/
+	cp assets/*.png DarkFi.app/assets/ || true
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
 	# Sign the app bundle with entitlements
