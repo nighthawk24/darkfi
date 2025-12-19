@@ -92,8 +92,6 @@ tracing-android = "0.2.0"
 tor-dirmgr = { version="0.36.0", features=["static"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-# Required by Arti: tor-dirmgr
-tor-dirmgr = { version="0.36.0", features=["static"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Used by tor-dirmgr
