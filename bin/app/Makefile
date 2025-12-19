@@ -56,6 +56,7 @@ ios-release: $(SRC) fonts forest_720x1280
 	cp -r assets/lang DarkFi.app/
 	cp -r assets/forest_720x1280 DarkFi.app/
 	cp assets/*.png DarkFi.app/ || true
+	cp embedded.mobileprovision DarkFi.app/ || echo "Warning: No provisioning profile found. Device builds will fail to launch."
 	cp ibm-plex-mono-regular.otf DarkFi.app/
 	cp NotoColorEmoji.ttf DarkFi.app/
 	# Sign the app bundle with entitlements
