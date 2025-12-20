@@ -143,6 +143,15 @@ impl God {
             }
         }
 
+        #[cfg(target_os = "ios")]
+        {
+            let home = std::env::var("HOME").unwrap_or(".".to_string());
+            let doc_path = std::path::PathBuf::from(home).join("Documents");
+            unsafe {
+                std::env::set_var("HOME", doc_path);
+            }
+        }
+
         let exe_path = std::env::current_exe().unwrap();
         let basename = exe_path.parent().unwrap();
         std::env::set_current_dir(basename).unwrap();
@@ -238,7 +247,7 @@ impl God {
         let cwd = std::env::current_dir().unwrap();
         info!("Current dir: {}", cwd.display());
 
-        self.fg_runtime.start_with_count(2);
+        self.fg_runtime.start();
 
         let app = self.app.clone();
         let cv = self.cv_app_is_setup.clone();

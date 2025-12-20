@@ -496,6 +496,15 @@ impl BaseEdit {
         }
         t!("Focus changed");
 
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            if self.is_focused.get() {
+                miniquad::window::show_keyboard(true);
+            } else {
+                miniquad::window::show_keyboard(false);
+            }
+        }
+
         let atom = &mut batch.spawn();
         // Cursor visibility will change so just redraw everything lol
         self.redraw(atom).await;
