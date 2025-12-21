@@ -1317,6 +1317,7 @@ impl Stage {
             GraphicsMethod::EndBatch { batch_id, timest: _ } => {
                 trax.put_end_batch(epoch, *batch_id);
             }
+            GraphicsMethod::ShowKeyboard(_) => {}
             GraphicsMethod::Noop => panic!("noop"),
         };
     }
@@ -1385,7 +1386,8 @@ impl Stage {
                 GraphicsMethod::UpdateSeqAnim { .. } |
                 GraphicsMethod::DeleteSeqAnim(_) |
                 GraphicsMethod::StartBatch { .. } |
-                GraphicsMethod::EndBatch { .. } => {
+                GraphicsMethod::EndBatch { .. } |
+                GraphicsMethod::ShowKeyboard(_) => {
                     panic!("unsupported pruned methods should be dropped!")
                 }
 
