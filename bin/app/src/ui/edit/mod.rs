@@ -499,9 +499,9 @@ impl BaseEdit {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             if self.is_focused.get() {
-                miniquad::window::show_keyboard(true);
+                self.render_api.show_keyboard(true);
             } else {
-                miniquad::window::show_keyboard(false);
+                self.render_api.show_keyboard(false);
             }
         }
 

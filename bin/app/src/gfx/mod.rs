@@ -346,6 +346,11 @@ impl RenderApi {
         let end_batch = Box::new(move |bid| r.end_batch(bid));
         PropertyAtomicGuard::new(start_batch, end_batch)
     }
+
+    pub fn show_keyboard(&self, show: bool) {
+        let method = GraphicsMethod::ShowKeyboard(show);
+        self.send(method);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -745,6 +750,7 @@ pub enum GraphicsMethod {
     ReplaceGfxDrawCalls { batch_id: BatchGuardId, dcs: Vec<(DcId, DrawCall)> },
     StartBatch { batch_id: BatchGuardId, tag: DebugTag },
     EndBatch { batch_id: BatchGuardId, timest: Timestamp },
+    ShowKeyboard(bool),
     Noop,
 }
 
@@ -764,6 +770,7 @@ impl std::fmt::Debug for GraphicsMethod {
             }
             Self::StartBatch { batch_id, tag } => write!(f, "StartBatch({batch_id}, {tag:?})"),
             Self::EndBatch { batch_id, timest } => write!(f, "EndBatch({batch_id}, {timest})"),
+            Self::ShowKeyboard(show) => write!(f, "ShowKeyboard({show})"),
             Self::Noop => write!(f, "Noop"),
         }
     }
@@ -1111,6 +1118,7 @@ impl Stage {
                     }
                 }
             }
+            GraphicsMethod::ShowKeyboard(show) => miniquad::window::show_keyboard(*show),
             GraphicsMethod::Noop => panic!("noop"),
         }
     }
@@ -1537,6 +1545,7 @@ impl PruneMethodHeap {
                 // Should have already been dropped previously
                 assert!(self.dropped_batches().contains(batch_id));
             }
+            GraphicsMethod::ShowKeyboard(_) => {}
             GraphicsMethod::Noop => panic!("noop"),
         }
     }
