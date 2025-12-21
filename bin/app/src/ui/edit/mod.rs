@@ -1282,6 +1282,11 @@ impl BaseEdit {
             panic!("self destroyed before insert_text_method_task was stopped!");
         };
 
+        {
+            let atom = &mut self_.render_api.make_guard(gfxtag!("BaseEdit::process_focus_method"));
+            self_.is_focused.set(atom, true);
+        }
+
         let editor = self_.lock_editor().await;
         editor.focus();
         true
@@ -1292,7 +1297,7 @@ impl BaseEdit {
             return false
         };
 
-        t!("method called: focus({method_call:?})");
+        t!("method called: unfocus({method_call:?})");
         assert!(method_call.send_res.is_none());
         assert!(method_call.data.is_empty());
 
@@ -1300,6 +1305,11 @@ impl BaseEdit {
             // Should not happen
             panic!("self destroyed before insert_text_method_task was stopped!");
         };
+
+        {
+            let atom = &mut self_.render_api.make_guard(gfxtag!("BaseEdit::process_unfocus_method"));
+            self_.is_focused.set(atom, false);
+        }
 
         let editor = self_.lock_editor().await;
         editor.unfocus();
