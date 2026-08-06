@@ -43,7 +43,7 @@ use smol::{
 use tor_cell::relaycell::msg::Connected;
 use tor_error::ErrorReport;
 use tor_hsservice::{HsNickname, RendRequest, RunningOnionService};
-use tor_proto::client::stream::IncomingStreamRequest;
+use tor_proto::stream::IncomingStreamRequest;
 use tor_rtcompat::PreferredRuntime;
 use tracing::debug;
 use url::Url;
@@ -51,13 +51,16 @@ use url::Url;
 use super::{PtListener, PtNegotiation, PtStream};
 use crate::util::{encoding::base32, logger::verbose, path::expand_path};
 
-/// A static for `TorClient` reusability
-static TOR_CLIENT: OnceCell<TorClient<PreferredRuntime>> = OnceCell::new();
+/// A static for `TorClient` reusability.
+///
+/// Arti ≥0.45 returns `Arc<TorClient<_>>` from bootstrap helpers and no longer
+/// implements `Clone` on the client itself.
+static TOR_CLIENT: OnceCell<Arc<TorClient<PreferredRuntime>>> = OnceCell::new();
 
 /// Tor Dialer implementation
 #[derive(Clone)]
 pub struct TorDialer {
-    client: TorClient<PreferredRuntime>,
+    client: Arc<TorClient<PreferredRuntime>>,
 }
 
 impl Debug for TorDialer {
