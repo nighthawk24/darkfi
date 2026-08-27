@@ -16,61 +16,53 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::io::{Cursor, Read, Result, Write};
+use std::{
+    io::{Cursor, Read, Result, Write},
+    ptr,
+};
 
 #[allow(unused_imports)]
 use tiny_keccak::{Hasher, Keccak};
 
+// Prefix of tiny-keccak 2.0 `KeccakState` (see lib.rs around the KeccakState
+// definition). Mode is omitted: a `#[repr(C)]` enum is larger than
+// tiny-keccak's Mode, so overlaying it made this type bigger than `Keccak`
+// and rustc 1.78+ rejects that as `invalid_reference_casting`.
 #[repr(C)]
-#[allow(unused)]
-enum Mode {
-    Absorbing,
-    Squeezing,
-}
-
-#[repr(C)]
-// https://docs.rs/tiny-keccak/latest/src/tiny_keccak/lib.rs.html#368
-struct KeccakState {
+struct KeccakStatePrefix {
     buffer: [u8; 200],
     offset: usize,
     rate: usize,
     delim: u8,
-    mode: Mode,
 }
 
 unsafe fn serialize_keccak<W: Write>(keccak: &Keccak, writer: &mut W) -> Result<()> {
-    let keccak_ptr = keccak as *const Keccak as *const KeccakState;
-    let keccak_state = &*keccak_ptr;
-
-    writer.write_all(&keccak_state.buffer)?;
-    writer.write_all(&(keccak_state.offset as u64).to_le_bytes())?;
-    writer.write_all(&(keccak_state.rate as u64).to_le_bytes())?;
-    writer.write_all(&[keccak_state.delim])?;
-
+    let p = keccak as *const Keccak as *const KeccakStatePrefix;
+    writer.write_all(&*ptr::addr_of!((*p).buffer))?;
+    writer.write_all(&(*ptr::addr_of!((*p).offset) as u64).to_le_bytes())?;
+    writer.write_all(&(*ptr::addr_of!((*p).rate) as u64).to_le_bytes())?;
+    writer.write_all(&[*ptr::addr_of!((*p).delim)])?;
     Ok(())
 }
 
 unsafe fn deserialize_keccak<R: Read>(reader: &mut R) -> Result<Keccak> {
     let mut keccak = Keccak::v256();
+    let p = &mut keccak as *mut Keccak as *mut KeccakStatePrefix;
 
-    let keccak_ptr = &mut keccak as *mut Keccak as *mut KeccakState;
-    let keccak_state = &mut *keccak_ptr;
-
-    reader.read_exact(&mut keccak_state.buffer)?;
+    reader.read_exact(&mut *ptr::addr_of_mut!((*p).buffer))?;
 
     let mut offset_bytes = [0u8; 8];
     reader.read_exact(&mut offset_bytes)?;
-    keccak_state.offset = u64::from_le_bytes(offset_bytes) as usize;
+    ptr::write(ptr::addr_of_mut!((*p).offset), u64::from_le_bytes(offset_bytes) as usize);
 
     let mut rate_bytes = [0u8; 8];
     reader.read_exact(&mut rate_bytes)?;
-    keccak_state.rate = u64::from_le_bytes(rate_bytes) as usize;
+    ptr::write(ptr::addr_of_mut!((*p).rate), u64::from_le_bytes(rate_bytes) as usize);
 
     let mut delim_byte = [0u8; 1];
     reader.read_exact(&mut delim_byte)?;
-    keccak_state.delim = delim_byte[0];
-
-    keccak_state.mode = Mode::Absorbing;
+    ptr::write(ptr::addr_of_mut!((*p).delim), delim_byte[0]);
+    // Mode stays Absorbing from Keccak::v256().
 
     Ok(keccak)
 }
