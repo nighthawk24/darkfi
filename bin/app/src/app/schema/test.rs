@@ -18,8 +18,6 @@
 
 #![allow(unused_imports, unused_variables, dead_code)]
 
-use sled_overlay::sled;
-
 use super::chat::populate_tree;
 use crate::{
     app::{
@@ -29,10 +27,12 @@ use crate::{
     expr::{self, Compiler},
     mesh::COLOR_PURPLE,
     prop::{PropertyAtomicGuard, PropertyFloat32, Role},
-    scene::SceneNodePtr,
+    scene::{Pimpl, SceneNodePtr},
     ui::{ChatView, Layer, Text, VectorArt, VectorShape, Video},
     util::i18n::I18nBabelFish,
 };
+use darkfi_serial::Encodable;
+use kvdb_overlay::Database as KvDb;
 
 const LIGHTMODE: bool = false;
 
@@ -83,7 +83,9 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     layer_node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
-    let layer_node = layer_node.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let layer_node = layer_node
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     window.link(layer_node.clone());
 
     // Create a bg mesh
@@ -127,7 +129,9 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         // Color
         [0., 1., 0., 1.],
     );
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
 
     /*
@@ -159,8 +163,9 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     };
     let indices = vec![0, 2, 1, 1, 2, 3];
     let shape = VectorShape { verts, indices };
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
     let node =
-        node.setup(|me| VectorArt::new(me, shape, app.renderer.clone(), app.ex.clone())).await;
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
 
     // Create the button
@@ -177,7 +182,7 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     //let slot_click = Slot { name: "button_clicked".to_string(), notify: sender };
     //node.register("click", slot_click).unwrap();
 
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let node = node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
 
     // Create another mesh
@@ -207,8 +212,9 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     };
     let indices = vec![0, 2, 1, 1, 2, 3];
     let shape = VectorShape { verts, indices };
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
     let node =
-        node.setup(|me| VectorArt::new(me, shape, app.renderer.clone(), app.ex.clone())).await;
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
 
     // Debugging tool
@@ -237,8 +243,9 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         expr::load_var("h"),
         [0., 1., 0., 1.],
     );
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
     let node =
-        node.setup(|me| VectorArt::new(me, shape, app.renderer.clone(), app.ex.clone())).await;
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
 
     // Create KING GNU!
@@ -250,7 +257,7 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     prop.set_f32(atom, Role::App, 3, 60.).unwrap();
     node.set_property_str(atom, Role::App, "path", KING_PATH).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
-    let node = node.setup(|me| Image::new(me, app.renderer.clone(), app.ex.clone())).await;
+    let node = node.setup(|me| Image::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
     */
 
@@ -263,7 +270,11 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     prop.set_f32(atom, Role::App, 3, 600.).unwrap();
     node.set_property_str(atom, Role::App, "path", VID_PATH).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
-    let node = node.setup(|me| Video::new(me, app.renderer.clone(), app.ex.clone())).await;
+    let node = node
+        .setup(|me| {
+            Video::new(me, app.renderer.clone(), app.redraw_trigger.clone(), app.ex.clone())
+        })
+        .await;
     layer_node.link(node);
 
     /*
@@ -294,7 +305,7 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     node.set_property_bool(atom, Role::App, "debug", true).unwrap();
 
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone(), app.redraw_trigger.clone()))
         .await;
     layer_node.link(node);
 
@@ -313,7 +324,6 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     node.set_property_f32(atom, Role::App, "line_height", 30.).unwrap();
     node.set_property_f32(atom, Role::App, "baseline", 20.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
-    //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
 
     let prop = node.get_property("timestamp_color").unwrap();
     prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
@@ -333,7 +343,36 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         prop.set_f32(atom, Role::App, 3, 1.).unwrap();
     }
 
-    let prop = node.get_property("nick_colors").unwrap();
+    let prop = node.get_property("hi_bg_color").unwrap();
+    prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
+    prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
+    prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
+    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+
+    let kv_db = KvDb::open_default(&get_chatdb_path()).expect("cannot open kvdb");
+    let chat_tree = kv_db.open_tree_default(&ChatView::tree_name("chat")).unwrap();
+    if chat_tree.is_empty().unwrap() {
+        populate_tree(&chat_tree);
+    }
+    debug!(target: "app", "db has {} lines", chat_tree.len().unwrap());
+    let node = node
+        .setup(|me| {
+            ChatView::new(
+                me,
+                kv_db,
+                window_scale.clone(),
+                i18n_fish.clone(),
+                app.renderer.clone(),
+                app.redraw_trigger.clone(),
+                app.ex.clone(),
+            )
+        })
+        .await;
+    layer_node.link(node.clone());
+
+    // Type-specific styling lives on the privmsg sub-node.
+    let privmsg_node = node.lookup_node("/privmsg").unwrap();
+    let prop = privmsg_node.get_property("nick_colors").unwrap();
     #[rustfmt::skip]
     let nick_colors = [
         0.00, 0.94, 1.00, 1.,
@@ -351,37 +390,15 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         prop.push_f32(atom, Role::App, c).unwrap();
     }
 
-    let prop = node.get_property("hi_bg_color").unwrap();
-    if LIGHTMODE {
-        prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else {
-        prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
-
-    let db = sled::open(get_chatdb_path()).expect("cannot open sleddb");
-    let chat_tree = db.open_tree(b"chat").unwrap();
-    if chat_tree.is_empty() {
-        populate_tree(&chat_tree);
-    }
-    debug!(target: "app", "db has {} lines", chat_tree.len());
-    let node = node
-        .setup(|me| {
-            ChatView::new(
-                me,
-                chat_tree,
-                window_scale.clone(),
-                app.renderer.clone(),
-                app.sg_root.clone(),
-            )
-        })
-        .await;
-    layer_node.link(node);
+    let bind_task = app.ex.spawn(async move {
+        // Over the method bus once start() has subscribed; the delay
+        // covers the setup -> start gap so the call isn't dropped.
+        darkfi::system::sleep(1).await;
+        let mut data = vec![];
+        "chat".encode(&mut data).unwrap();
+        let _ = node.call_method("set_channel", data).await;
+    });
+    app.tasks.lock().unwrap().push(bind_task);
 
     // Text edit
     let node = create_singleline_edit("editz");
@@ -464,6 +481,7 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
                 me,
                 window_scale.clone(),
                 app.renderer.clone(),
+                app.redraw_trigger.clone(),
                 BaseEditType::SingleLine,
                 app.ex.clone(),
                 //BaseEditType::MultiLine,

@@ -17,27 +17,26 @@
  */
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer, Registry};
+
 #[cfg(feature = "enable-filelog")]
 use {
     file_rotate::{compression::Compression, suffix::AppendCount, ContentLimit, FileRotate},
     std::path::PathBuf,
+    std::sync::OnceLock,
 };
 
 #[cfg(target_os = "android")]
 use tracing_subscriber::filter::{LevelFilter, Targets};
 
 #[cfg(any(not(target_os = "android"), feature = "enable-filelog"))]
-use {
-    darkfi::util::logger::{EventFormatter, Level, TargetFilter},
-    //tracing_subscriber::fmt::format::FmtSpan,
-};
+use darkfi::util::logger::{EventFormatter, Level, TargetFilter};
 
 // Measured in bytes
 #[cfg(feature = "enable-filelog")]
 const LOGFILE_MAXSIZE: usize = 5_000_000;
 
 static MUTED_TARGETS: &[&'static str] = &[
-    "sled",
+    "fjall",
     "rustls",
     "async_io",
     "polling",
@@ -54,9 +53,16 @@ static MUTED_TARGETS: &[&'static str] = &[
     "event_graph::dag_sync()",
     "event_graph::dag_insert()",
     "event_graph::protocol",
+    "turso_core",
+    "turso_sqlite",
+    "walletdb",
+    "rpc::client",
+    // Bridged `log` crate records (pulseaudio protocol trace spam)
+    "log",
+    "pulseaudio",
 ];
 #[cfg(not(target_os = "android"))]
-static ALLOW_TRACE: &[&'static str] = &["ui", "app", "gfx", "plugin", "app"];
+static ALLOW_TRACE: &[&'static str] = &["ui", "app", "gfx", "plugin", "app", "main"];
 
 #[cfg(all(target_os = "android", feature = "enable-filelog"))]
 fn logfile_path() -> PathBuf {
@@ -69,17 +75,38 @@ fn logfile_path() -> PathBuf {
     dirs::cache_dir().unwrap().join("darkfi/darkfi-app.log")
 }
 
+// On Android, resolving the log path is a JNI call into the JVM, which can
+// deadlock if invoked from the panic hook. We therefore resolve it once at
+// startup (before the panic hook is installed) and cache it here, so the
+// hook only performs an atomic load plus a synchronous file write.
+#[cfg(feature = "enable-filelog")]
+static LOGFILE_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+#[cfg(feature = "enable-filelog")]
+pub fn init_logfile_path() {
+    let _ = LOGFILE_PATH.set(logfile_path());
+}
+
+#[cfg(feature = "enable-filelog")]
+pub fn cached_logfile_path() -> Option<&'static std::path::Path> {
+    LOGFILE_PATH.get().map(|path| path.as_path())
+}
+
+#[cfg(not(feature = "enable-filelog"))]
+pub fn cached_logfile_path() -> Option<&'static std::path::Path> {
+    None
+}
+
 pub fn setup_logging() -> Option<WorkerGuard> {
     let mut layers: Vec<(Box<dyn Layer<Registry> + Send + Sync>, Option<WorkerGuard>)> = vec![];
 
     #[cfg(feature = "enable-filelog")]
     {
         let (non_blocking_file_rotate, guard) = tracing_appender::non_blocking(FileRotate::new(
-            logfile_path(),
+            LOGFILE_PATH.get_or_init(logfile_path).clone(),
             AppendCount::new(0),
             ContentLimit::BytesSurpassed(LOGFILE_MAXSIZE),
             Compression::None,
-            #[cfg(unix)]
             None,
         ));
 
@@ -91,7 +118,17 @@ pub fn setup_logging() -> Option<WorkerGuard> {
             .with_writer(non_blocking_file_rotate)
             .with_filter(
                 TargetFilter::default()
-                    .ignore_targets(["sled", "rustls", "async_io", "polling"])
+                    .ignore_targets([
+                        "fjall",
+                        "rustls",
+                        "async_io",
+                        "polling",
+                        "turso_core",
+                        "turso_sqlite",
+                        "walletdb",
+                        "rpc::client",
+                    ])
+                    .targets_level(["log", "pulseaudio"], Level::Warn)
                     .default_level(Level::Trace),
             );
 

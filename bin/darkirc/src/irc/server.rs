@@ -30,7 +30,7 @@ use darkfi::{
     util::path::expand_path,
     Error, Result,
 };
-use darkfi_serial::{deserialize_async, serialize_async};
+use darkfi_serial::{deserialize_async, deserialize_async_partial, serialize_async};
 use futures_rustls::{
     rustls::{
         self,
@@ -38,7 +38,7 @@ use futures_rustls::{
     },
     TlsAcceptor,
 };
-use sled_overlay::sled;
+use kvdb_overlay::{Batch, Database};
 use smol::{
     fs,
     lock::{Mutex, RwLock},
@@ -67,6 +67,10 @@ pub const MAX_NICK_LEN: usize = 24;
 /// Max message length
 pub const MAX_MSG_LEN: usize = 512;
 
+/// Kvdb tree storing every public (`#`-prefixed) IRC channel we have
+/// observed on the p2p network. Keys are channel names; values are empty.
+pub const SEEN_CHANNELS_TREE: &str = "darkirc_seen_channels";
+
 /// Result of attempting to reserve the next RLN message slot.
 pub enum RlnMessageReservation {
     /// No active RLN identity is configured.
@@ -78,26 +82,24 @@ pub enum RlnMessageReservation {
 }
 
 /// Persist the active RLN counter to the default mirror and matching account tree.
-async fn persist_rln_identity_counter(sled_db: &sled::Db, identity: &RlnIdentity) -> Result<()> {
+async fn persist_rln_identity_counter(kvdb: &Database, identity: &RlnIdentity) -> Result<()> {
     let encoded = serialize_async(identity).await;
     let active_commitment = identity.commitment();
     let mut updated_account = false;
 
-    for raw in sled_db.tree_names() {
-        let bytes: &[u8] = raw.as_ref();
-        let Ok(name) = std::str::from_utf8(bytes) else { continue };
+    for name in kvdb.tree_names()? {
         let Some(account_name) = name.strip_prefix(ACCOUNTS_DB_PREFIX) else { continue };
         if account_name == "default" || account_name.is_empty() {
             continue
         }
 
-        let tree = sled_db.open_tree(name)?;
+        let tree = kvdb.open_tree_default(&name)?;
         let Some(blob) = tree.get(ACCOUNTS_KEY_RLN_IDENTITY)? else { continue };
         let Ok(stored): std::result::Result<RlnIdentity, _> = deserialize_async(&blob).await else {
             continue
         };
         if stored.commitment() == active_commitment {
-            tree.insert(ACCOUNTS_KEY_RLN_IDENTITY, encoded.clone())?;
+            tree.insert(ACCOUNTS_KEY_RLN_IDENTITY, &encoded)?;
             updated_account = true;
         }
     }
@@ -109,15 +111,15 @@ async fn persist_rln_identity_counter(sled_db: &sled::Db, identity: &RlnIdentity
         );
     }
 
-    let default_db = sled_db.open_tree(ACCOUNTS_DEFAULT_TREE)?;
-    default_db.insert(ACCOUNTS_KEY_RLN_IDENTITY, encoded)?;
-    sled_db.flush_async().await?;
+    let default_db = kvdb.open_tree_default(ACCOUNTS_DEFAULT_TREE)?;
+    default_db.insert(ACCOUNTS_KEY_RLN_IDENTITY, &encoded)?;
+    kvdb.flush_default_mode_async().await?;
     Ok(())
 }
 
 /// Reserve the next RLN message ID and persist it before proof creation.
 pub(crate) async fn reserve_rln_message_id_in_store(
-    sled_db: &sled::Db,
+    kvdb: &Database,
     active: &mut Option<RlnIdentity>,
     now_millis: u64,
 ) -> Result<RlnMessageReservation> {
@@ -128,7 +130,7 @@ pub(crate) async fn reserve_rln_message_id_in_store(
         return Ok(RlnMessageReservation::BudgetExhausted)
     };
 
-    persist_rln_identity_counter(sled_db, &updated).await?;
+    persist_rln_identity_counter(kvdb, &updated).await?;
     *current = updated;
 
     Ok(RlnMessageReservation::Reserved { identity: updated, message_id })
@@ -184,10 +186,10 @@ fn load_tls_acceptor(tls_cert: &str, tls_secret: &str) -> Result<TlsAcceptor> {
     tls_acceptor_from_pem(&mut cert_reader, &mut secret_reader)
 }
 
-async fn load_default_rln_identity(sled_db: &sled::Db) -> Result<Option<RlnIdentity>> {
-    let default_db = sled_db.open_tree(ACCOUNTS_DEFAULT_TREE)?;
+async fn load_default_rln_identity(kvdb: &Database) -> Result<Option<RlnIdentity>> {
+    let default_db = kvdb.open_tree_default(ACCOUNTS_DEFAULT_TREE)?;
     let Some(blob) = default_db.get(ACCOUNTS_KEY_RLN_IDENTITY)? else {
-        if default_db.is_empty() {
+        if default_db.is_empty()? {
             return Ok(None)
         }
 
@@ -232,7 +234,7 @@ impl IrcServer {
     /// Reserve and persist the next RLN message slot before proof creation.
     pub async fn reserve_rln_message_id(&self, now_millis: u64) -> Result<RlnMessageReservation> {
         let mut active = self.rln_identity.write().await;
-        reserve_rln_message_id_in_store(&self.darkirc.sled, &mut active, now_millis).await
+        reserve_rln_message_id_in_store(&self.darkirc.kvdb, &mut active, now_millis).await
     }
 
     /// Instantiate a new IRC server. This function will try to bind a TCP socket,
@@ -278,7 +280,7 @@ impl IrcServer {
         // Set the default RLN account if any. When RLN is disabled, avoid
         // loading account state that cannot affect outbound messages.
         let rln_identity = if darkirc.event_graph.rln_enabled() {
-            let rln_identity = load_default_rln_identity(&darkirc.sled).await?;
+            let rln_identity = load_default_rln_identity(&darkirc.kvdb).await?;
             if rln_identity.is_some() {
                 info!("Default RLN account set");
             }
@@ -355,6 +357,13 @@ impl IrcServer {
         *self.autojoin.write().await = autojoin;
         *self.channels.write().await = channels;
         *self.contacts.write().await = contacts;
+
+        // Record configured public channels so `/LIST` can report them even
+        // before any traffic is observed for them on the network.
+        let names: Vec<String> = self.channels.read().await.keys().cloned().collect();
+        for name in &names {
+            self.record_seen_channel(name).await?;
+        }
 
         Ok(())
     }
@@ -457,6 +466,61 @@ impl IrcServer {
         );
 
         Ok(())
+    }
+
+    /// Record a public (`#`-prefixed) IRC channel in the `SEEN_CHANNELS_TREE`
+    /// so that `/LIST` can report channels observed on the p2p network.
+    /// Private (encrypted) channels — those with a configured saltbox — are
+    /// skipped. Idempotent. Emits a debug log the first time a given channel
+    /// is seen.
+    pub async fn record_seen_channel(&self, channel: &str) -> Result<()> {
+        if !channel.starts_with('#') {
+            return Ok(())
+        }
+
+        // Skip private channels that have a configured saltbox.
+        if let Some(chan) = self.channels.read().await.get(channel) {
+            if chan.saltbox.is_some() {
+                return Ok(())
+            }
+        }
+
+        let tree = self.darkirc.kvdb.open_tree_default(SEEN_CHANNELS_TREE)?;
+        if tree.insert(channel.as_bytes(), &[])?.is_none() {
+            debug!(
+                target: "darkirc::irc::server",
+                "Recorded new public channel: {channel}"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Walk every stored event in the DAG and record all public (`#`-prefixed)
+    /// channels into the `SEEN_CHANNELS_TREE`. Intended to be called once the
+    /// event graph finishes syncing, so that `/LIST` reflects the full set of
+    /// known public channels even before any new live traffic arrives.
+    /// Only the raw wire channel field is inspected: encrypted (private)
+    /// channels carry base58 ciphertext and are skipped.
+    pub async fn populate_seen_channels(&self) -> Result<usize> {
+        let events = self.darkirc.event_graph.order_events().await?;
+        let tree = self.darkirc.kvdb.open_tree_default(SEEN_CHANNELS_TREE)?;
+        let mut batch = Batch::default();
+        let mut count = 0usize;
+        for event in events.iter() {
+            let Ok((privmsg, _)) = deserialize_async_partial::<Privmsg>(event.content()).await
+            else {
+                continue
+            };
+            if privmsg.channel.starts_with('#') {
+                batch.insert(privmsg.channel.as_bytes(), &[]);
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.darkirc.kvdb.atomic_write(&[(&tree, &batch)])?;
+        }
+        Ok(count)
     }
 
     /// Try encrypting a given `Privmsg` if there is such a channel/contact.
@@ -597,9 +661,9 @@ mod tests {
     #[test]
     fn load_default_rln_identity_returns_none_for_empty_tree() {
         smol::block_on(async {
-            let sled_db = sled::Config::new().temporary(true).open().unwrap();
+            let (kvdb, _kvdb_folder) = Database::open_temp().unwrap();
 
-            let identity = load_default_rln_identity(&sled_db).await.unwrap();
+            let identity = load_default_rln_identity(&kvdb).await.unwrap();
 
             assert!(identity.is_none());
         })
@@ -608,11 +672,11 @@ mod tests {
     #[test]
     fn load_default_rln_identity_rejects_missing_identity_record() {
         smol::block_on(async {
-            let sled_db = sled::Config::new().temporary(true).open().unwrap();
-            let default = sled_db.open_tree(ACCOUNTS_DEFAULT_TREE).unwrap();
+            let (kvdb, _kvdb_folder) = Database::open_temp().unwrap();
+            let default = kvdb.open_tree_default(ACCOUNTS_DEFAULT_TREE).unwrap();
             default.insert(b"other", b"value").unwrap();
 
-            let err = match load_default_rln_identity(&sled_db).await {
+            let err = match load_default_rln_identity(&kvdb).await {
                 Ok(_) => panic!("expected missing identity record error"),
                 Err(e) => e,
             };
@@ -627,11 +691,11 @@ mod tests {
     #[test]
     fn load_default_rln_identity_rejects_corrupted_identity_record() {
         smol::block_on(async {
-            let sled_db = sled::Config::new().temporary(true).open().unwrap();
-            let default = sled_db.open_tree(ACCOUNTS_DEFAULT_TREE).unwrap();
+            let (kvdb, _kvdb_folder) = Database::open_temp().unwrap();
+            let default = kvdb.open_tree_default(ACCOUNTS_DEFAULT_TREE).unwrap();
             default.insert(ACCOUNTS_KEY_RLN_IDENTITY, b"not an identity").unwrap();
 
-            let err = match load_default_rln_identity(&sled_db).await {
+            let err = match load_default_rln_identity(&kvdb).await {
                 Ok(_) => panic!("expected corrupted identity record error"),
                 Err(e) => e,
             };
@@ -643,18 +707,18 @@ mod tests {
     #[test]
     fn rln_message_reservation_persists_default_and_account_counters() {
         smol::block_on(async {
-            let sled_db = sled::Config::new().temporary(true).open().unwrap();
-            let account = sled_db.open_tree(format!("{ACCOUNTS_DB_PREFIX}alice")).unwrap();
-            let default = sled_db.open_tree(ACCOUNTS_DEFAULT_TREE).unwrap();
+            let (kvdb, _kvdb_folder) = Database::open_temp().unwrap();
+            let account = kvdb.open_tree_default(&format!("{ACCOUNTS_DB_PREFIX}alice")).unwrap();
+            let default = kvdb.open_tree_default(ACCOUNTS_DEFAULT_TREE).unwrap();
             let identity = test_identity(2);
             let encoded = serialize_async(&identity).await;
-            account.insert(ACCOUNTS_KEY_RLN_IDENTITY, encoded.clone()).unwrap();
-            default.insert(ACCOUNTS_KEY_RLN_IDENTITY, encoded).unwrap();
+            account.insert(ACCOUNTS_KEY_RLN_IDENTITY, &encoded).unwrap();
+            default.insert(ACCOUNTS_KEY_RLN_IDENTITY, &encoded).unwrap();
 
             let now = 1_704_067_800_000;
             let mut active = Some(identity);
             let reservation =
-                reserve_rln_message_id_in_store(&sled_db, &mut active, now).await.unwrap();
+                reserve_rln_message_id_in_store(&kvdb, &mut active, now).await.unwrap();
             let RlnMessageReservation::Reserved { identity: reserved, message_id } = reservation
             else {
                 panic!("expected reservation")
@@ -677,14 +741,13 @@ mod tests {
             assert_eq!(stored_account.last_epoch, epoch_of(now));
 
             let reservation =
-                reserve_rln_message_id_in_store(&sled_db, &mut active, now).await.unwrap();
+                reserve_rln_message_id_in_store(&kvdb, &mut active, now).await.unwrap();
             let RlnMessageReservation::Reserved { message_id, .. } = reservation else {
                 panic!("expected second reservation")
             };
             assert_eq!(message_id, 1);
 
-            let exhausted =
-                reserve_rln_message_id_in_store(&sled_db, &mut active, now).await.unwrap();
+            let exhausted = reserve_rln_message_id_in_store(&kvdb, &mut active, now).await.unwrap();
             assert!(matches!(exhausted, RlnMessageReservation::BudgetExhausted));
         })
     }

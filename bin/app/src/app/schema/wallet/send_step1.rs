@@ -22,7 +22,7 @@ use darkfi_serial::Decodable;
 
 use crate::{
     app::{
-        node::{create_button, create_layer, create_tokentable, create_vector_art},
+        node::{create_layer, create_tokentable},
         schema::COLOR_SCHEME,
         App,
     },
@@ -30,8 +30,7 @@ use crate::{
     gfx::gfxtag,
     prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, Role},
     scene::{SceneNodePtr, Slot},
-    shape,
-    ui::{Button, Layer, TokenRow, TokenTable, VectorArt},
+    ui::{Layer, TokenRow, TokenTable},
     util::i18n::I18nBabelFish,
 };
 
@@ -58,8 +57,6 @@ pub async fn make(
     cc.add_const_f32("RECIPIENT_INPUT_MARGIN", RECIPIENT_INPUT_MARGIN);
     cc.add_const_f32("RECIPIENT_INPUT_PADDING_X", RECIPIENT_INPUT_PADDING_X);
 
-    let main_layer = wallet_layer.lookup_node("/main_layer").unwrap();
-
     // ============================================
     // Step 1: Pick token layer
     // ============================================
@@ -71,7 +68,9 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     send_step1_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     send_step1_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let send_step1_layer = send_step1_layer.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let send_step1_layer = send_step1_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     wallet_layer.link(send_step1_layer.clone());
     let step1_is_visible =
         PropertyBool::wrap(&send_step1_layer, Role::App, "is_visible", 0).unwrap();
@@ -79,45 +78,7 @@ pub async fn make(
     create_bg_mesh(app, atom, &send_step1_layer, "send_bg").await;
     create_header_bg(app, atom, &send_step1_layer, "send_header_bg").await;
 
-    // Back button
-    let node = create_vector_art("send_back_btn_bg");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, BACKARROW_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, BACKARROW_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let shape = shape::create_back_arrow().scaled(BACKARROW_SCALE);
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
-    send_step1_layer.link(node);
-
     let mut y = 0.;
-
-    let node = create_button("send_back_btn");
-    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, y).unwrap();
-    prop.set_f32(atom, Role::App, 2, WALLET_BTN_SIZE * 2.).unwrap();
-    prop.set_f32(atom, Role::App, 3, HEADER_HEIGHT).unwrap();
-
-    let main_is_visible = PropertyBool::wrap(&main_layer, Role::App, "is_visible", 0).unwrap();
-    let renderer = app.renderer.clone();
-    let main_is_visible1 = main_is_visible.clone();
-    let step1_is_visible1 = step1_is_visible.clone();
-    let (slot, recvr) = Slot::new("send_back_clicked");
-    node.register("click", slot).unwrap();
-    let listen_click = app.ex.spawn(async move {
-        while let Ok(_) = recvr.recv().await {
-            let atom = &mut renderer.make_guard(gfxtag!("send back button"));
-            main_is_visible1.set(atom, true);
-            step1_is_visible1.set(atom, false);
-        }
-    });
-    app.tasks.lock().unwrap().push(listen_click);
-
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
-    send_step1_layer.link(node);
 
     y += HEADER_HEIGHT;
 
@@ -166,14 +127,15 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 2, 0.2784).unwrap();
     prop.set_f32(atom, Role::App, 3, 1.).unwrap();
 
-    let send_tokens_table =
-        send_tokens_table.setup(|me| TokenTable::new(me, app.renderer.clone())).await;
+    let send_tokens_table = send_tokens_table
+        .setup(|me| TokenTable::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     send_step1_layer.link(send_tokens_table.clone());
 
     let (slot, recvr) = Slot::new("token_row_clicked");
     send_tokens_table.register("row_click", slot).unwrap();
     let sg_root = app.sg_root.clone();
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let send_tx_data2 = send_tx_data.clone();
     let step1_is_visible3 = step1_is_visible.clone();
     let listen_click = app.ex.spawn(async move {
@@ -185,7 +147,7 @@ pub async fn make(
                 data.token_id = Some(row.id);
                 drop(data);
 
-                let atom = &mut renderer.make_guard(gfxtag!("token selection"));
+                let atom = &mut redraw.make_guard(gfxtag!("token selection"));
                 if let Some(selected_token_symbol) = sg_root.lookup_node(
                     "/window/content/wallet/send_step2_layer/send_selected_token_symbol",
                 ) {

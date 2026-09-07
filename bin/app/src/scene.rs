@@ -34,7 +34,9 @@ use crate::{
     plugin,
     prop::{Property, PropertyAtomicGuard, PropertyPtr, Role},
     pubsub::{Publisher, PublisherPtr, Subscription},
+    setting::SettingPtr,
     ui,
+    ui::VectorShape,
 };
 
 macro_rules! t { ($($arg:tt)*) => { trace!(target: "scene", $($arg)*); } }
@@ -109,17 +111,19 @@ pub enum SceneNodeType {
     Texture = 10,
     Fonts = 11,
     Font = 12,
-    ChatView = 13,
     Edit = 14,
     Image = 15,
     Button = 16,
     Shortcut = 17,
-    Gesture = 18,
     EmojiPicker = 19,
-    SettingRoot = 20,
     Setting = 21,
     Menu = 22,
     TokenTable = 23,
+    TextScramble = 24,
+    ChatView = 25,
+    PrivMsgNode = 26,
+    DateMsgNode = 27,
+    FileMsgNode = 28,
     PluginRoot = 100,
     Plugin = 101,
 }
@@ -329,6 +333,15 @@ impl SceneNode {
     ) -> Result<()> {
         self.get_property(name).ok_or(Error::PropertyNotFound)?.set_node_id(atom, role, 0, val)
     }
+    pub fn set_property_shape(
+        &self,
+        atom: &mut PropertyAtomicGuard,
+        role: Role,
+        name: &str,
+        val: VectorShape,
+    ) -> Result<()> {
+        self.get_property(name).ok_or(Error::PropertyNotFound)?.set_shape(atom, role, 0, val)
+    }
 
     pub fn set_property_f32_vec(
         &self,
@@ -390,17 +403,7 @@ impl SceneNode {
     pub async fn trigger(&self, sig_name: &str, data: Vec<u8>) -> Result<()> {
         t!("trigger({sig_name}, {data:?}) [node={self:?}]");
         let sig = self.get_signal(sig_name).ok_or(Error::SignalNotFound)?;
-        let futures = FuturesUnordered::new();
-        let slots: Vec<_> = sig.slots.read().unwrap().values().cloned().collect();
-        // TODO: autoremove failed slots
-        for slot in slots {
-            t!("  triggering {}", slot.name);
-            // Trigger the slot
-            let data = data.clone();
-            futures.push(async move { slot.notify.send(data).await.is_ok() });
-        }
-        let success: Vec<_> = futures.collect().await;
-        t!("trigger success: {success:?}");
+        sig.trigger(data).await;
         Ok(())
     }
 
@@ -538,6 +541,20 @@ impl Signal {
         let slots = self.slots.read().unwrap();
         slots.iter().map(|(id, slot)| (*id, slot.clone())).collect()
     }
+
+    pub async fn trigger(&self, data: Vec<u8>) {
+        let futures = FuturesUnordered::new();
+        let slots: Vec<_> = self.slots.read().unwrap().values().cloned().collect();
+        // TODO: autoremove failed slots
+        for slot in slots {
+            t!("  triggering {}", slot.name);
+            // Trigger the slot
+            let data = data.clone();
+            futures.push(async move { slot.notify.send(data).await.is_ok() });
+        }
+        let success: Vec<_> = futures.collect().await;
+        t!("trigger success: {success:?}");
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -589,19 +606,21 @@ pub enum Pimpl {
     VectorArt(ui::VectorArtPtr),
     Text(ui::TextPtr),
     Edit(ui::BaseEditPtr),
-    ChatView(ui::ChatViewPtr),
     Image(ui::ImagePtr),
     Video(ui::VideoPtr),
     Button(ui::ButtonPtr),
     Shortcut(ui::ShortcutPtr),
-    Gesture(ui::GesturePtr),
     EmojiPicker(ui::EmojiPickerPtr),
     Menu(ui::MenuPtr),
     TokenTable(ui::TokenTablePtr),
+    Setting(SettingPtr),
+    TextScramble(ui::TextScramblePtr),
+    ChatView(ui::ChatViewPtr),
+    PrivMsgNode(ui::chatview::msg::PrivMsgNodePtr),
+    DateMsgNode(ui::chatview::msg::DateMsgNodePtr),
+    FileMsgNode(ui::chatview::msg::FileMsgNodePtr),
     #[cfg(feature = "enable-plugin-darkirc")]
     DarkIrc(plugin::DarkIrcPtr),
-    #[cfg(feature = "enable-plugin-darkirc")]
-    DarkIrc2(plugin::DarkIrc2Ptr),
     #[cfg(feature = "enable-plugin-fud")]
     Fud(plugin::FudPtr),
     #[cfg(feature = "enable-plugin-drk")]

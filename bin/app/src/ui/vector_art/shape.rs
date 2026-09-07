@@ -19,11 +19,12 @@
 use crate::{
     error::Result,
     expr::{Op, SExprCode, SExprMachine, SExprVal},
-    gfx::Vertex,
+    gfx::{Point, Vertex},
     mesh::Color,
 };
+use darkfi_serial::{Encodable, VarInt};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ShapeVertex {
     x: SExprCode,
     y: SExprCode,
@@ -48,6 +49,16 @@ impl ShapeVertex {
         y.push(Op::Mul((Box::new(Op::ConstFloat32(scale)), Box::new(last_y))));
         Self { x, y, color: self.color }
     }
+
+    pub fn offset(mut self, off: Point) -> Self {
+        let last_x = self.x.pop().unwrap();
+        let last_y = self.y.pop().unwrap();
+        let mut x = self.x;
+        x.push(Op::Add((Box::new(last_x), Box::new(Op::ConstFloat32(off.x)))));
+        let mut y = self.y;
+        y.push(Op::Add((Box::new(last_y), Box::new(Op::ConstFloat32(off.y)))));
+        Self { x, y, color: self.color }
+    }
 }
 
 // This is bullshit. We need something in expr to support joining exprs somehow. Subroutines.
@@ -63,7 +74,7 @@ fn sexpr_mul(mut x: SExprCode, op: Op) -> Option<Op> {
     Some(Op::Mul((Box::new(eqn), Box::new(op))))
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct VectorShape {
     pub verts: Vec<ShapeVertex>,
     pub indices: Vec<u16>,
@@ -253,6 +264,28 @@ impl VectorShape {
         );
     }
 
+    /// Draw a line of a certain thickness between two points.
+    /// Coordinates are constants, so this does not track expressions like `w` or `h`.
+    pub fn add_line(&mut self, from: Point, to: Point, thickness: f32, color: Color) {
+        let dx = to.x - from.x;
+        let dy = to.y - from.y;
+        let length = (dx * dx + dy * dy).sqrt();
+        if length == 0. {
+            return
+        }
+
+        let half = thickness / 2.;
+        let px = -dy / length * half;
+        let py = dx / length * half;
+
+        let i = self.verts.len() as u16;
+        self.verts.push(ShapeVertex::from_xy(from.x + px, from.y + py, color.clone()));
+        self.verts.push(ShapeVertex::from_xy(to.x + px, to.y + py, color.clone()));
+        self.verts.push(ShapeVertex::from_xy(from.x - px, from.y - py, color.clone()));
+        self.verts.push(ShapeVertex::from_xy(to.x - px, to.y - py, color));
+        self.indices.extend([i, i + 2, i + 1, i + 1, i + 2, i + 3]);
+    }
+
     pub fn add_radial_glow(
         &mut self,
         center_x: SExprCode,
@@ -309,5 +342,65 @@ impl VectorShape {
             verts: self.verts.into_iter().map(|v| v.scale(scale)).collect(),
             indices: self.indices,
         }
+    }
+
+    pub fn offset(self, off: Point) -> Self {
+        Self {
+            verts: self.verts.into_iter().map(|v| v.offset(off)).collect(),
+            indices: self.indices,
+        }
+    }
+}
+
+impl Encodable for ShapeVertex {
+    fn encode<S: std::io::Write>(&self, s: &mut S) -> std::result::Result<usize, std::io::Error> {
+        let mut len = 0;
+        len += self.x.encode(s)?;
+        len += self.y.encode(s)?;
+        for c in self.color {
+            len += c.encode(s)?;
+        }
+        Ok(len)
+    }
+}
+
+impl Encodable for VectorShape {
+    fn encode<S: std::io::Write>(&self, s: &mut S) -> std::result::Result<usize, std::io::Error> {
+        let mut len = 0;
+        len += VarInt(self.verts.len() as u64).encode(s)?;
+        for vert in &self.verts {
+            len += vert.encode(s)?;
+        }
+        len += VarInt(self.indices.len() as u64).encode(s)?;
+        for index in &self.indices {
+            len += index.encode(s)?;
+        }
+        Ok(len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use darkfi_serial::serialize;
+
+    #[test]
+    fn encode_shape() {
+        let mut shape = VectorShape::new();
+        shape.add_filled_box(
+            vec![Op::ConstFloat32(0.)],
+            vec![Op::ConstFloat32(0.)],
+            vec![Op::ConstFloat32(10.)],
+            vec![Op::ConstFloat32(10.)],
+            [0., 0., 0., 1.],
+        );
+
+        let data = serialize(&shape);
+        // vert count, then first vert: x code len 1, ConstFloat32 op tag 7
+        assert_eq!(data[0], 4);
+        assert_eq!(data[1], 1);
+        assert_eq!(data[2], 7);
+        // 4 verts x (1+1+4) x 2 coords + 16 color bytes, then 6 u16 indices
+        assert_eq!(data.len(), 1 + 4 * (6 + 6 + 16) + 1 + 6 * 2);
     }
 }

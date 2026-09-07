@@ -16,15 +16,16 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use super::long_press_timeout;
 use async_trait::async_trait;
 use atomic_float::AtomicF32;
 use darkfi::system::CondVar;
 use darkfi_serial::{serialize, Decodable};
-use miniquad::{MouseButton, TouchPhase};
+use miniquad::MouseButton;
 use parking_lot::Mutex as SyncMutex;
 use rand::{rngs::OsRng, Rng};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashSet,
     io::Read,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -33,17 +34,17 @@ use std::{
 };
 
 use crate::{
-    gfx::{gfxtag, DrawCall, DrawInstruction, Point, Rectangle, RenderApi, Renderer, RendererSync},
+    gfx::{gfxtag, DrawCall, DrawInstruction, DrawMesh, Point, Rectangle, Renderer, Vertex},
     mesh::MeshBuilder,
     prop::{
-        BatchGuardId, BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyColor,
-        PropertyFloat32, PropertyPtr, PropertyRect, PropertyUint32, Role,
+        PropertyAtomicGuard, PropertyBool, PropertyColor, PropertyFloat32, PropertyPtr,
+        PropertyRect, PropertyUint32, Role,
     },
     scene::{MethodCallSub, Pimpl, SceneNodeWeak},
     text, ExecutorPtr,
 };
 
-use super::{DrawUpdate, OnModify, UIObject};
+use super::{DrawUpdate, GestureAction, GestureSet, OnModify, RedrawTrigger, UIObject};
 
 mod shape;
 
@@ -60,22 +61,6 @@ const MENU_ICON_OFFSET: f32 = 24.;
 macro_rules! d { ($($arg:tt)*) => { debug!(target: "ui::menu", $($arg)*); } }
 macro_rules! t { ($($arg:tt)*) => { trace!(target: "ui::menu", $($arg)*); } }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ItemStatus {
-    Active,
-    Alert,
-}
-
-#[derive(Clone)]
-struct TouchInfo {
-    start_scroll: f32,
-    start_pos: Point,
-    start_instant: std::time::Instant,
-    samples: VecDeque<(std::time::Instant, f32)>,
-    last_instant: std::time::Instant,
-    last_y: f32,
-}
-
 #[derive(Clone)]
 struct MouseClickInfo {
     start_pos: Point,
@@ -88,42 +73,19 @@ struct DragInfo {
     insert_idx: usize,
 }
 
-impl TouchInfo {
-    fn new(start_scroll: f32, pos: Point) -> Self {
-        Self {
-            start_scroll,
-            start_pos: pos,
-            start_instant: std::time::Instant::now(),
-            samples: VecDeque::from([(std::time::Instant::now(), pos.y)]),
-            last_instant: std::time::Instant::now(),
-            last_y: pos.y,
-        }
-    }
-
-    fn push_sample(&mut self, y: f32) {
-        self.samples.push_back((std::time::Instant::now(), y));
-
-        while let Some((instant, _)) = self.samples.front() {
-            if instant.elapsed().as_micros() <= 40_000 {
-                break
-            }
-            self.samples.pop_front();
-        }
-    }
-
-    fn first_sample(&self) -> Option<(f32, f32)> {
-        self.samples.front().map(|(t, s)| (t.elapsed().as_micros() as f32 / 1000., *s))
-    }
-}
-
 pub type MenuPtr = Arc<Menu>;
 
 pub struct Menu {
     node: SceneNodeWeak,
+    /// Weak self-reference so handlers can spawn detached tasks.
+    me: Weak<Self>,
+    ex: ExecutorPtr,
     renderer: Renderer,
+    redraw: RedrawTrigger,
     tasks: SyncMutex<Vec<smol::Task<()>>>,
     root_dc_key: u64,
     content_dc_key: u64,
+    bg_dc_key: u64,
 
     is_visible: PropertyBool,
     rect: PropertyRect,
@@ -139,28 +101,38 @@ pub struct Menu {
     bg_color: PropertyColor,
     sep_size: PropertyFloat32,
     sep_color: PropertyColor,
-    active_color: PropertyColor,
-    alert_color: PropertyColor,
+    role1_color: PropertyColor,
+    role1_group: PropertyPtr,
+    role2_color: PropertyColor,
+    role2_group: PropertyPtr,
     fade_zone: PropertyFloat32,
     window_scale: PropertyFloat32,
 
     mouse_pos: SyncMutex<Point>,
-    touch_info: SyncMutex<Option<TouchInfo>>,
     mouse_click_info: SyncMutex<Option<MouseClickInfo>>,
     drag_info: SyncMutex<Option<DragInfo>>,
     long_press_task: SyncMutex<Option<smol::Task<()>>>,
-    weak_self: SyncMutex<Option<Weak<Self>>>,
-    ex: SyncMutex<Option<ExecutorPtr>>,
+    /// Active 1:1 scroll drag: (finger y at drag start, scroll at drag
+    /// start), parent space.
+    drag_state: SyncMutex<Option<(f32, f32)>>,
     scroll_start_accel: PropertyFloat32,
     scroll_resist: PropertyFloat32,
+    overscroll: PropertyFloat32,
     motion_cv: Arc<CondVar>,
     speed: AtomicF32,
     is_edit_mode: AtomicBool,
 
     parent_rect: SyncMutex<Option<Rectangle>>,
-    item_states: SyncMutex<HashMap<String, ItemStatus>>,
-
     saved_items: SyncMutex<Option<Vec<String>>>,
+
+    /// Opaque per-item text instructions, indexed by item position.
+    item_instrs: SyncMutex<Vec<Option<Vec<DrawInstruction>>>>,
+    /// Content instructions tagged with the scroll offset they were
+    /// assembled for. `None` means stale.
+    content_cache: SyncMutex<Option<(f32, Vec<DrawInstruction>)>>,
+    /// Viewport-anchored background meshes: opaque part plus fade
+    /// gradient. `None` means stale.
+    bg_meshes: SyncMutex<Option<(DrawMesh, Option<DrawMesh>)>>,
 }
 
 impl Menu {
@@ -168,6 +140,8 @@ impl Menu {
         node: SceneNodeWeak,
         window_scale: PropertyFloat32,
         renderer: Renderer,
+        redraw: RedrawTrigger,
+        ex: ExecutorPtr,
     ) -> Pimpl {
         let node_ref = &node.upgrade().unwrap();
         let is_visible = PropertyBool::wrap(node_ref, Role::Internal, "is_visible", 0).unwrap();
@@ -184,8 +158,10 @@ impl Menu {
         let bg_color = PropertyColor::wrap(node_ref, Role::Internal, "bg_color").unwrap();
         let sep_size = PropertyFloat32::wrap(node_ref, Role::Internal, "sep_size", 0).unwrap();
         let sep_color = PropertyColor::wrap(node_ref, Role::Internal, "sep_color").unwrap();
-        let active_color = PropertyColor::wrap(node_ref, Role::Internal, "active_color").unwrap();
-        let alert_color = PropertyColor::wrap(node_ref, Role::Internal, "alert_color").unwrap();
+        let role1_color = PropertyColor::wrap(node_ref, Role::Internal, "role1_color").unwrap();
+        let role1_group = node_ref.get_property("role1_group").unwrap();
+        let role2_color = PropertyColor::wrap(node_ref, Role::Internal, "role2_color").unwrap();
+        let role2_group = node_ref.get_property("role2_group").unwrap();
 
         let fade_zone = PropertyFloat32::wrap(node_ref, Role::Internal, "fade_zone", 0).unwrap();
 
@@ -193,15 +169,20 @@ impl Menu {
             PropertyFloat32::wrap(node_ref, Role::Internal, "scroll_start_accel", 0).unwrap();
         let scroll_resist =
             PropertyFloat32::wrap(node_ref, Role::Internal, "scroll_resist", 0).unwrap();
+        let overscroll = PropertyFloat32::wrap(node_ref, Role::Internal, "overscroll", 0).unwrap();
 
         let motion_cv = Arc::new(CondVar::new());
 
-        let self_ = Arc::new(Self {
+        let self_ = Arc::new_cyclic(|me| Self {
             node: node.clone(),
+            me: me.clone(),
+            ex,
             renderer: renderer.clone(),
+            redraw,
             tasks: SyncMutex::new(vec![]),
             root_dc_key: OsRng.gen(),
             content_dc_key: OsRng.gen(),
+            bg_dc_key: OsRng.gen(),
             is_visible,
             rect,
             scroll: AtomicF32::new(0.),
@@ -215,28 +196,39 @@ impl Menu {
             bg_color,
             sep_size,
             sep_color,
-            active_color,
-            alert_color,
+            role1_color,
+            role1_group,
+            role2_color,
+            role2_group,
             fade_zone,
             window_scale,
             mouse_pos: SyncMutex::new(Point::new(0., 0.)),
-            touch_info: SyncMutex::new(None),
             mouse_click_info: SyncMutex::new(None),
             drag_info: SyncMutex::new(None),
             long_press_task: SyncMutex::new(None),
-            weak_self: SyncMutex::new(None),
-            ex: SyncMutex::new(None),
+            drag_state: SyncMutex::new(None),
             scroll_start_accel,
             scroll_resist,
+            overscroll,
             motion_cv,
             speed: AtomicF32::new(0.),
             is_edit_mode: AtomicBool::new(false),
             parent_rect: SyncMutex::new(None),
-            item_states: SyncMutex::new(HashMap::new()),
             saved_items: SyncMutex::new(None),
+            item_instrs: SyncMutex::new(vec![]),
+            content_cache: SyncMutex::new(None),
+            bg_meshes: SyncMutex::new(None),
         });
 
         Pimpl::Menu(self_)
+    }
+
+    /// Invalidate all cached draw artifacts. Locks are taken one at a
+    /// time, never nested, so this cannot deadlock against `draw()`.
+    fn invalidate_draw(&self) {
+        *self.item_instrs.lock() = vec![];
+        *self.content_cache.lock() = None;
+        *self.bg_meshes.lock() = None;
     }
 
     /// Height of a single item
@@ -270,11 +262,8 @@ impl Menu {
 
     async fn handle_selection(&self, item_idx: usize) {
         if item_idx < self.items.get_len() {
-            let item_name = self.items.get_str(item_idx).unwrap();
-
-            self.item_states.lock().remove(&item_name);
-
             let node = self.node.upgrade().unwrap();
+            let item_name = self.items.get_str(item_idx).unwrap();
             let data = serialize(&item_name);
             node.trigger("select", data).await.unwrap();
         }
@@ -287,15 +276,17 @@ impl Menu {
         is_long_press_tap: bool,
         elapsed_ms: u128,
     ) {
-        let is_long_press = is_long_press_tap && elapsed_ms >= 500;
+        let is_long_press = is_long_press_tap && elapsed_ms >= long_press_timeout() as u128;
 
         if is_long_press {
-            self.save_items_layout();
-            self.is_edit_mode.store(true, Ordering::Release);
-            let node = self.node.upgrade().unwrap();
-            node.trigger("edit_active", vec![]).await.unwrap();
-            let atom = &mut self.renderer.make_guard(gfxtag!("Menu::long_press"));
-            self.redraw(atom);
+            if !self.is_edit_mode.load(Ordering::Relaxed) {
+                self.save_items_layout();
+                self.is_edit_mode.store(true, Ordering::Release);
+                let node = self.node.upgrade().unwrap();
+                node.trigger("edit_active", vec![]).await.unwrap();
+                self.invalidate_draw();
+                self.redraw.trigger();
+            }
         } else if is_tap {
             let is_edit_mode = self.is_edit_mode.load(Ordering::Relaxed);
 
@@ -312,9 +303,8 @@ impl Menu {
 
                     if pos.x >= x_min && pos.x <= x_max {
                         info!(target: "app::menu", "X clicked for item: {item_name}");
-                        let atom = &mut self.renderer.make_guard(gfxtag!("Menu::delete_item"));
+                        let atom = &mut self.redraw.make_guard(gfxtag!("Menu::delete_item"));
                         self.items.remove_str(atom, Role::App, item_idx).unwrap();
-                        self.redraw(atom);
                     } else {
                         self.handle_selection(item_idx).await;
                     }
@@ -325,70 +315,123 @@ impl Menu {
         }
     }
 
-    fn get_draw_calls(
-        &self,
-        atom: &mut PropertyAtomicGuard,
-        parent_rect: Rectangle,
-    ) -> Option<DrawUpdate> {
-        self.rect.eval(atom, &parent_rect).ok()?;
-        let rect = self.rect.get();
+    /// Fade alpha for a content-space y position at the given scroll:
+    /// 1 above the fade zone, decreasing linearly to 0 at the bottom
+    /// edge of the viewport.
+    fn fade_factor(&self, rect: &Rectangle, content_y: f32, scroll: f32) -> f32 {
+        let fade_distance = self.fade_zone.get();
+        if fade_distance <= EPSILON {
+            return 1.0
+        }
 
+        let viewport_y = content_y - scroll;
+        let fade_zone_start = rect.h - fade_distance;
+        if viewport_y <= fade_zone_start {
+            return 1.0
+        }
+
+        1.0 - ((viewport_y - fade_zone_start) / fade_distance).clamp(0.0, 1.0)
+    }
+
+    /// Render a single item's text as draw instructions with the given
+    /// color.
+    fn make_text_instrs(
+        &self,
+        item_text: &str,
+        color: crate::mesh::Color,
+        rect: &Rectangle,
+        font_size: f32,
+        window_scale: f32,
+        padding_x: f32,
+    ) -> Vec<DrawInstruction> {
+        let layout = text::make_layout(
+            item_text,
+            color,
+            font_size,
+            1.0,
+            window_scale,
+            Some(rect.w - padding_x * 2.),
+            &[],
+        );
+
+        text::render_layout(&layout, &self.renderer, gfxtag!("menu_text"))
+    }
+
+    /// Assemble the content draw instructions for the given scroll
+    /// offset. Items away from the fade zone reuse cached opaque text
+    /// instructions; items intersecting it are rebuilt with faded
+    /// colors. Separators are baked into one mesh with per-separator
+    /// alpha at absolute content positions.
+    fn assemble_content(&self, rect: &Rectangle, scroll: f32) -> Vec<DrawInstruction> {
         let mut instrs = vec![];
 
-        let scroll = self.scroll.load(Ordering::Relaxed);
         let item_height = self.get_item_height();
         let font_size = self.font_size.get();
         let padding_x = self.padding.get_f32(0).unwrap();
         let padding_y = self.padding.get_f32(1).unwrap();
         let handle_padding = self.handle_padding.get();
         let text_color = self.text_color.get();
-        let active_color = self.active_color.get();
-        let alert_color = self.alert_color.get();
-        let bg_color = self.bg_color.get();
+        let role1_color = self.role1_color.get();
+        let role2_color = self.role2_color.get();
         let sep_size = self.sep_size.get();
         let sep_color = self.sep_color.get();
-        let fade_distance = self.fade_zone.get();
         let window_scale = self.window_scale.get();
+
+        let role1_set: HashSet<String> =
+            self.role1_group.get_str_vec().unwrap_or_default().into_iter().collect();
+        let role2_set: HashSet<String> =
+            self.role2_group.get_str_vec().unwrap_or_default().into_iter().collect();
 
         let num_items = self.items.get_len();
 
         // Get items and reorder if dragging
-        let mut items_list = {
+        let items_list = {
             let mut items = vec![];
             for idx in 0..num_items {
                 items.push(self.items.get_str(idx).unwrap());
             }
+
+            if let Some(ref drag_info) = self.drag_info.lock().as_ref() {
+                if drag_info.item_idx != drag_info.insert_idx {
+                    let item = items.remove(drag_info.item_idx);
+                    items.insert(drag_info.insert_idx, item);
+                }
+            }
             items
         };
 
-        if let Some(ref drag_info) = self.drag_info.lock().as_ref() {
-            if drag_info.item_idx != drag_info.insert_idx {
-                let item = items_list.remove(drag_info.item_idx);
-                items_list.insert(drag_info.insert_idx, item);
+        // Single separator mesh covering all separators, each faded by
+        // its on-screen position. Drawn first while the cursor sits at
+        // the content origin, so baked positions map directly.
+        if num_items > 1 {
+            let mut sep_builder = MeshBuilder::new(gfxtag!("menu_sep"));
+            let uv = [0., 0.];
+
+            for idx in 0..num_items - 1 {
+                let y = (idx + 1) as f32 * item_height;
+                let factor = self.fade_factor(rect, y, scroll);
+                if factor <= 0.0 {
+                    continue
+                }
+
+                let color = [sep_color[0], sep_color[1], sep_color[2], sep_color[3] * factor];
+                sep_builder.append(
+                    vec![
+                        Vertex { pos: [0., y], color, uv },
+                        Vertex { pos: [rect.w, y], color, uv },
+                        Vertex { pos: [0., y + sep_size], color, uv },
+                        Vertex { pos: [rect.w, y + sep_size], color, uv },
+                    ],
+                    vec![0, 2, 1, 1, 2, 3],
+                );
             }
+
+            let sep_mesh = sep_builder.alloc(&self.renderer).draw_untextured();
+            instrs.push(DrawInstruction::Draw(sep_mesh));
         }
 
-        // Draw single background mesh for the entire menu
-        let content_height = num_items as f32 * item_height;
-
-        let mut bg_mesh = MeshBuilder::new(gfxtag!("menu_bg"));
-        bg_mesh.draw_filled_box(&Rectangle::new(0., 0., rect.w, content_height), bg_color);
-        let bg_mesh = bg_mesh.alloc(&self.renderer).draw_untextured();
-
-        instrs.push(DrawInstruction::Draw(bg_mesh));
-
-        // Separator line mesh
-        let mut sep_mesh = MeshBuilder::new(gfxtag!("menu_sep"));
-        sep_mesh.draw_filled_box(&Rectangle::new(0., 0., rect.w, sep_size), sep_color);
-        let sep_mesh = sep_mesh.alloc(&self.renderer).draw_untextured();
-
-        let item_states = self.item_states.lock();
         let is_edit_mode = self.is_edit_mode.load(Ordering::Relaxed);
         let edit_offset = if is_edit_mode { handle_padding } else { 0.0 };
-
-        // Create X mesh for edit mode
-        let x_mesh =
-            if is_edit_mode { Some(shape::make_x(&self.renderer, font_size)) } else { None };
 
         let mut edit_instrs = vec![];
         if is_edit_mode {
@@ -405,110 +448,95 @@ impl Menu {
             edit_instrs.push(DrawInstruction::Move(Point::new(-rhs, -item_center_y)));
         }
 
+        let mut item_instrs = self.item_instrs.lock();
+        if item_instrs.len() != num_items {
+            item_instrs.clear();
+            item_instrs.resize(num_items, None);
+        }
+
         for idx in 0..num_items {
             let item_text = items_list[idx].clone();
 
-            let base_color = match item_states.get(&item_text) {
-                Some(ItemStatus::Active) => active_color,
-                Some(ItemStatus::Alert) => alert_color,
-                _ => text_color,
+            let base_color = if role2_set.contains(&item_text) {
+                role2_color
+            } else if role1_set.contains(&item_text) {
+                role1_color
+            } else {
+                text_color
             };
 
-            // Apply fade effect in the configured fade zone
-            let item_y = idx as f32 * item_height - scroll;
-            let fade_zone_start = rect.h - fade_distance;
-            let color = if item_y >= fade_zone_start {
-                let fade_factor =
-                    1.0 - ((item_y - fade_zone_start) / fade_distance).clamp(0.0, 1.0);
-                let mut faded = base_color;
-                faded[3] *= fade_factor;
-                faded
-            } else {
-                base_color
-            };
+            let factor = self.fade_factor(rect, idx as f32 * item_height, scroll);
+            if factor <= 0.0 {
+                continue
+            }
 
             instrs.append(&mut edit_instrs.clone());
-
-            // Draw text
-            let layout = text::make_layout(
-                &item_text,
-                color,
-                font_size,
-                1.0,
-                window_scale,
-                Some(rect.w - padding_x * 2.),
-                &[],
-            );
-
-            let text_instr = text::render_layout(&layout, &self.renderer, gfxtag!("menu_text"));
 
             // Use a fraction of edit_offset for the label position to reduce gap from X icon
             let label_edit_offset = edit_offset * 0.62;
             instrs
                 .push(DrawInstruction::Move(Point::new(padding_x + label_edit_offset, padding_y)));
-            instrs.extend(text_instr);
+
+            if factor >= 1.0 {
+                if item_instrs[idx].is_none() {
+                    item_instrs[idx] = Some(self.make_text_instrs(
+                        &item_text,
+                        base_color,
+                        rect,
+                        font_size,
+                        window_scale,
+                        padding_x,
+                    ));
+                }
+                instrs.extend(item_instrs[idx].clone().unwrap());
+            } else {
+                let mut faded = base_color;
+                faded[3] *= factor;
+                instrs.extend(self.make_text_instrs(
+                    &item_text,
+                    faded,
+                    rect,
+                    font_size,
+                    window_scale,
+                    padding_x,
+                ));
+            }
+
             instrs.push(DrawInstruction::Move(Point::new(
                 -padding_x - label_edit_offset,
                 font_size + padding_y,
             )));
-
-            // Draw separator (except for last item)
-            if idx < num_items - 1 {
-                instrs.push(DrawInstruction::Draw(sep_mesh.clone()));
-            }
         }
 
-        Some(DrawUpdate {
-            key: self.root_dc_key,
-            draw_calls: vec![
-                (
-                    self.root_dc_key,
-                    DrawCall {
-                        instrs: vec![
-                            DrawInstruction::ApplyView(rect),
-                            DrawInstruction::Move(Point::new(0., -scroll)),
-                        ],
-                        dcs: vec![self.content_dc_key],
-                        z_index: self.z_index.get(),
-                        debug_str: "menu_root",
-                    },
-                ),
-                (
-                    self.content_dc_key,
-                    DrawCall {
-                        instrs,
-                        dcs: vec![],
-                        z_index: self.z_index.get(),
-                        debug_str: "menu_content",
-                    },
-                ),
-            ],
-        })
+        instrs
     }
 
-    fn redraw(&self, atom: &mut PropertyAtomicGuard) {
-        let Some(parent_rect) = self.parent_rect.lock().clone() else { return };
-        let Some(draw_update) = self.get_draw_calls(atom, parent_rect) else { return };
-        self.renderer.replace_draw_calls(Some(atom.batch_id), draw_update.draw_calls);
-    }
+    /// Build the viewport-anchored background meshes: an opaque quad
+    /// above the fade zone and a gradient quad fading to fully
+    /// transparent at the bottom edge, so the parent background shows
+    /// through.
+    fn make_bg_meshes(&self, rect: &Rectangle) -> (DrawMesh, Option<DrawMesh>) {
+        let fade_distance = self.fade_zone.get();
+        let content_height = self.content_height();
+        let bg_color = self.bg_color.get();
 
-    fn redraw_scroll<R: RenderApi>(&self, renderer: &R) {
-        let rect = self.rect.get();
-        let scroll = self.scroll.load(Ordering::Relaxed);
+        let fade_top = if fade_distance > EPSILON { rect.h - fade_distance } else { rect.h };
+        let main_bottom = fade_top.min(content_height).min(rect.h);
 
-        // Only recreate root with updated scroll position
-        let root_instrs =
-            vec![DrawInstruction::ApplyView(rect), DrawInstruction::Move(Point::new(0., -scroll))];
+        let mut main_builder = MeshBuilder::new(gfxtag!("menu_bg"));
+        if main_bottom > 0. {
+            main_builder.draw_filled_box(&Rectangle::new(0., 0., rect.w, main_bottom), bg_color);
+        }
+        let main_mesh = main_builder.alloc(&self.renderer).draw_untextured();
 
-        let root_dc = DrawCall {
-            instrs: root_instrs,
-            dcs: vec![self.content_dc_key],
-            z_index: self.z_index.get(),
-            debug_str: "menu_root",
+        let fade_mesh = if fade_distance > EPSILON && content_height > fade_top {
+            let fade_bottom = rect.h.min(content_height);
+            Some(shape::make_fade_mesh(&self.renderer, rect.w, fade_top, fade_bottom, bg_color))
+        } else {
+            None
         };
 
-        let draw_calls = vec![(self.root_dc_key, root_dc)];
-        renderer.replace_draw_calls(None, draw_calls);
+        (main_mesh, fade_mesh)
     }
 
     fn scrollview(&self, scroll: f32) {
@@ -517,11 +545,9 @@ impl Menu {
         let content_height = num_items * item_height;
 
         let rect = self.rect.get();
-        let max_scroll = (content_height - rect.h).max(0.);
-
-        // Allow 50% overscroll past the end of the content
-        let overscroll = rect.h * 0.5;
-        let scroll = scroll.clamp(0., max_scroll + overscroll);
+        let overscroll = self.overscroll.get();
+        let max_scroll = (overscroll + content_height - rect.h).max(0.);
+        let scroll = scroll.clamp(0., max_scroll);
         self.scroll.store(scroll, Ordering::Relaxed);
     }
 
@@ -544,7 +570,7 @@ impl Menu {
                 speed = self.speed.load(Ordering::Relaxed);
                 let scroll = self.scroll.load(Ordering::Relaxed);
                 self.scrollview(scroll + speed);
-                self.redraw_scroll(&self.renderer);
+                self.redraw.trigger();
                 speed *= resist;
                 self.speed.store(speed, Ordering::Relaxed);
                 darkfi::system::msleep(16).await;
@@ -553,84 +579,6 @@ impl Menu {
             self.speed.store(0., Ordering::Relaxed);
             break
         }
-    }
-
-    fn end_touch_phase(&self, touch_y: f32) {
-        let touch_info = std::mem::take(&mut *self.touch_info.lock());
-        let info = touch_info.unwrap();
-
-        if let Some((dt, _)) = info.first_sample() {
-            if dt > EPSILON {
-                let velocity = (touch_y - info.start_pos.y) / dt;
-                self.start_scroll(-velocity);
-            }
-        }
-    }
-
-    async fn process_mark_active_method(me: &Weak<Self>, sub: &MethodCallSub) -> bool {
-        let Ok(method_call) = sub.receive().await else {
-            d!("Event relayer closed");
-            return false
-        };
-
-        d!("method called: mark_active({method_call:?})");
-        assert!(method_call.send_res.is_none());
-
-        fn decode_data(data: &[u8]) -> std::io::Result<String> {
-            use std::io::Cursor;
-            let mut cur = Cursor::new(&data);
-            let item_name = String::decode(&mut cur)?;
-            Ok(item_name)
-        }
-
-        let Ok(item_name) = decode_data(&method_call.data) else {
-            d!("mark_active() method invalid arg data");
-            return true
-        };
-
-        let Some(self_) = me.upgrade() else {
-            d!("Self destroyed");
-            return true
-        };
-
-        self_.item_states.lock().insert(item_name, ItemStatus::Active);
-        let atom = &mut self_.renderer.make_guard(gfxtag!("Menu::mark_active"));
-        self_.redraw(atom);
-
-        true
-    }
-
-    async fn process_mark_alert_method(me: &Weak<Self>, sub: &MethodCallSub) -> bool {
-        let Ok(method_call) = sub.receive().await else {
-            d!("Event relayer closed");
-            return false
-        };
-
-        d!("method called: mark_alert({method_call:?})");
-        assert!(method_call.send_res.is_none());
-
-        fn decode_data(data: &[u8]) -> std::io::Result<String> {
-            use std::io::Cursor;
-            let mut cur = Cursor::new(&data);
-            let item_name = String::decode(&mut cur)?;
-            Ok(item_name)
-        }
-
-        let Ok(item_name) = decode_data(&method_call.data) else {
-            d!("mark_alert() method invalid arg data");
-            return true
-        };
-
-        let Some(self_) = me.upgrade() else {
-            d!("Self destroyed");
-            return true
-        };
-
-        self_.item_states.lock().insert(item_name, ItemStatus::Alert);
-        let atom = &mut self_.renderer.make_guard(gfxtag!("Menu::mark_alert"));
-        self_.redraw(atom);
-
-        true
     }
 
     /// Cancels edit mode changes, reverting any modifications made during edit mode
@@ -648,7 +596,7 @@ impl Menu {
             return true
         };
 
-        let atom = &mut self_.renderer.make_guard(gfxtag!("Menu::cancel_edit"));
+        let atom = &mut self_.redraw.make_guard(gfxtag!("Menu::cancel_edit"));
 
         // Restore the saved items
         // It must exist otherwise theres a logic err
@@ -657,7 +605,7 @@ impl Menu {
 
         // Exit edit mode
         self_.is_edit_mode.store(false, Ordering::Release);
-        self_.redraw(atom);
+        self_.invalidate_draw();
 
         true
     }
@@ -690,8 +638,8 @@ impl Menu {
         node.trigger("edit_done", data).await.unwrap();
 
         self_.is_edit_mode.store(false, Ordering::Release);
-        let atom = &mut self_.renderer.make_guard(gfxtag!("Menu::done_edit"));
-        self_.redraw(atom);
+        self_.invalidate_draw();
+        self_.redraw.trigger();
 
         true
     }
@@ -704,9 +652,7 @@ impl UIObject for Menu {
     }
 
     async fn start(self: Arc<Self>, ex: ExecutorPtr) {
-        *self.weak_self.lock() = Some(Arc::downgrade(&self));
-        *self.ex.lock() = Some(ex.clone());
-        let me = Arc::downgrade(&self);
+        let me = self.me.clone();
         let node_ref = &self.node.upgrade().unwrap();
 
         let me2 = me.clone();
@@ -723,20 +669,6 @@ impl UIObject for Menu {
             }
         });
 
-        let method_sub = node_ref.subscribe_method_call("mark_active").unwrap();
-        let me2 = me.clone();
-        let mark_active_task =
-            ex.spawn(
-                async move { while Self::process_mark_active_method(&me2, &method_sub).await {} },
-            );
-
-        let method_sub = node_ref.subscribe_method_call("mark_alert").unwrap();
-        let me2 = me.clone();
-        let mark_alert_task =
-            ex.spawn(
-                async move { while Self::process_mark_alert_method(&me2, &method_sub).await {} },
-            );
-
         let method_sub = node_ref.subscribe_method_call("cancel_edit").unwrap();
         let me2 = me.clone();
         let cancel_task =
@@ -749,28 +681,71 @@ impl UIObject for Menu {
 
         let mut on_modify = OnModify::new(ex, self.node.clone(), me.clone());
 
-        async fn redraw(self_: Arc<Menu>, batch: BatchGuardPtr) {
-            let atom = &mut batch.spawn();
-            self_.redraw(atom);
-        }
+        on_modify.when_change_external(self.items.clone(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.rect.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.font_size.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.padding.clone(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.text_color.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.bg_color.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.sep_size.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.sep_color.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.fade_zone.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.role1_color.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.role1_group.clone(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.role2_color.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.role2_group.clone(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.window_scale.prop(), |self_, _| async move {
+            self_.invalidate_draw();
+            self_.redraw.trigger();
+        });
 
-        on_modify.when_change(self.items.clone(), redraw);
-        on_modify.when_change(self.rect.prop(), redraw);
-        on_modify.when_change(self.font_size.prop(), redraw);
-        on_modify.when_change(self.padding.clone(), redraw);
-        on_modify.when_change(self.text_color.prop(), redraw);
-        on_modify.when_change(self.bg_color.prop(), redraw);
-        on_modify.when_change(self.sep_size.prop(), redraw);
-        on_modify.when_change(self.sep_color.prop(), redraw);
-
-        let mut tasks =
-            vec![motion_task, mark_active_task, mark_alert_task, cancel_task, done_task];
+        let mut tasks = vec![motion_task, cancel_task, done_task];
         tasks.append(&mut on_modify.tasks);
         *self.tasks.lock() = tasks;
     }
 
     fn stop(&self) {
         *self.tasks.lock() = vec![];
+        self.invalidate_draw();
     }
 
     async fn draw(
@@ -779,7 +754,77 @@ impl UIObject for Menu {
         atom: &mut PropertyAtomicGuard,
     ) -> Option<DrawUpdate> {
         *self.parent_rect.lock() = Some(parent_rect);
-        self.get_draw_calls(atom, parent_rect)
+
+        // Rect property is its own memo: compare before/after eval.
+        let prev_rect = self.rect.get();
+        self.rect.eval(atom, &parent_rect).ok()?;
+        let rect = self.rect.get();
+        let rect_changed = rect != prev_rect;
+
+        // The root shell is cheap: re-emit it every pass with the
+        // current scroll so scroll pokes don't invalidate content.
+        let scroll = self.scroll.load(Ordering::Relaxed);
+
+        // Background meshes are viewport-anchored, so they only depend
+        // on the rect and content height, never on scroll.
+        let mut bg = self.bg_meshes.lock();
+        if bg.is_none() || rect_changed {
+            *bg = Some(self.make_bg_meshes(&rect));
+        }
+        let bg_meshes = bg.clone();
+        drop(bg);
+
+        // Content is reassembled when stale or when the scroll moved:
+        // only fade-zone items and the separator mesh are rebuilt, the
+        // rest reuse cached instructions.
+        let mut cache = self.content_cache.lock();
+        let stale = match cache.as_ref() {
+            Some((cached_scroll, _)) => *cached_scroll != scroll,
+            None => true,
+        };
+        if stale || rect_changed {
+            *cache = Some((scroll, self.assemble_content(&rect, scroll)));
+        }
+        let instrs = cache.as_ref().unwrap().1.clone();
+        drop(cache);
+
+        let mut root_dcs = vec![];
+        let mut draw_calls = vec![(
+            self.root_dc_key,
+            DrawCall {
+                instrs: vec![
+                    DrawInstruction::ApplyView(rect),
+                    DrawInstruction::Move(Point::new(0., -scroll)),
+                ],
+                dcs: vec![],
+                z_index: self.z_index.get(),
+                debug_str: "menu_root",
+            },
+        )];
+
+        if let Some((main_mesh, fade_mesh)) = bg_meshes {
+            root_dcs.push(self.bg_dc_key);
+            let mut bg_instrs = vec![
+                DrawInstruction::Move(Point::new(0., scroll)),
+                DrawInstruction::Draw(main_mesh),
+            ];
+            if let Some(fade_mesh) = fade_mesh {
+                bg_instrs.push(DrawInstruction::Draw(fade_mesh));
+            }
+            draw_calls.push((
+                self.bg_dc_key,
+                DrawCall { instrs: bg_instrs, dcs: vec![], z_index: 0, debug_str: "menu_bg" },
+            ));
+        }
+
+        root_dcs.push(self.content_dc_key);
+        draw_calls[0].1.dcs = root_dcs;
+        draw_calls.push((
+            self.content_dc_key,
+            DrawCall { instrs, dcs: vec![], z_index: 1, debug_str: "menu_content" },
+        ));
+
+        Some(DrawUpdate { key: self.root_dc_key, draw_calls })
     }
 
     async fn handle_mouse_btn_down(&self, btn: MouseButton, mouse_pos: Point) -> bool {
@@ -813,14 +858,14 @@ impl UIObject for Menu {
             Some(MouseClickInfo { start_pos: mouse_pos, start_instant: std::time::Instant::now() });
 
         // Spawn a task to detect long press
-        let weak_self = self.weak_self.lock().clone().unwrap();
+        let me = self.me.clone();
         let start_pos = mouse_pos;
 
-        let ex = self.ex.lock().clone().unwrap();
+        let ex = self.ex.clone();
         let long_press_task = ex.spawn(async move {
-            darkfi::system::msleep(500).await;
+            darkfi::system::msleep(long_press_timeout() as u64).await;
 
-            let Some(arc_self) = weak_self.upgrade() else { return };
+            let Some(arc_self) = me.upgrade() else { return };
             let current_mouse_pos = arc_self.mouse_pos.lock().clone();
             let click_info = arc_self.mouse_click_info.lock().clone();
 
@@ -836,8 +881,8 @@ impl UIObject for Menu {
                     arc_self.is_edit_mode.store(true, Ordering::Release);
                     let node = arc_self.node.upgrade().unwrap();
                     node.trigger("edit_active", vec![]).await.unwrap();
-                    let atom = &mut arc_self.renderer.make_guard(gfxtag!("Menu::long_press"));
-                    arc_self.redraw(atom);
+                    arc_self.invalidate_draw();
+                    arc_self.redraw.trigger();
                 }
             }
         });
@@ -857,7 +902,7 @@ impl UIObject for Menu {
         if let Some(drag_info) = drag {
             if drag_info.item_idx != drag_info.insert_idx {
                 let item = self.items.get_str(drag_info.item_idx).unwrap();
-                let atom = &mut self.renderer.make_guard(gfxtag!("Menu::reorder_item"));
+                let atom = &mut self.redraw.make_guard(gfxtag!("Menu::reorder_item"));
                 self.items.remove_str(atom, Role::App, drag_info.item_idx).unwrap();
                 let insert_idx = drag_info.insert_idx;
                 self.items.insert_str(atom, Role::App, insert_idx, &item).unwrap();
@@ -918,43 +963,36 @@ impl UIObject for Menu {
         }
 
         if should_redraw {
-            let atom = &mut self.renderer.make_guard(gfxtag!("Menu::drag_update"));
-            self.redraw(atom);
+            self.invalidate_draw();
+            self.redraw.trigger();
         }
 
         false
     }
 
-    fn handle_touch_sync(
-        &self,
-        renderer: &RendererSync,
-        phase: TouchPhase,
-        id: u64,
-        touch_pos: Point,
-    ) -> bool {
-        if id != 0 {
-            return false
-        }
+    fn gesture_set(&self) -> GestureSet {
+        GestureSet::MENU
+    }
 
-        match phase {
-            TouchPhase::Started => {
-                let rect = self.rect.get();
-                if !rect.contains(touch_pos) {
-                    *self.touch_info.lock() = None;
-                    return false
-                }
+    fn gesture_hit_test(&self, pos: Point) -> bool {
+        self.rect.get().contains(pos)
+    }
 
-                let is_edit_mode = self.is_edit_mode.load(Ordering::Relaxed);
-
-                if is_edit_mode {
+    async fn handle_gesture(&self, gesture: GestureAction) -> bool {
+        match gesture {
+            GestureAction::Down { pos } => {
+                // Arm the item-reorder grab: touching a reorder handle
+                // is a zero-threshold action, not a recognized gesture.
+                if self.is_edit_mode.load(Ordering::Relaxed) {
+                    let rect = self.rect.get();
                     let font_size = self.font_size.get();
                     let hammy_half_size = font_size * 2.0;
                     let hammy_center = rect.w - MENU_ICON_OFFSET - font_size * 0.56;
                     let hammy_min = hammy_center - hammy_half_size;
                     let hammy_max = hammy_center + hammy_half_size;
 
-                    if touch_pos.x >= hammy_min && touch_pos.x <= hammy_max {
-                        if let Some(item_idx) = self.get_selected_item_index(touch_pos.y) {
+                    if pos.x >= hammy_min && pos.x <= hammy_max {
+                        if let Some(item_idx) = self.get_selected_item_index(pos.y) {
                             *self.drag_info.lock() =
                                 Some(DragInfo { item_idx, insert_idx: item_idx });
                             info!(target: "app::menu", "Dragging item: {}", item_idx);
@@ -962,78 +1000,64 @@ impl UIObject for Menu {
                     }
                 }
 
-                *self.touch_info.lock() =
-                    Some(TouchInfo::new(self.scroll.load(Ordering::Relaxed), touch_pos));
                 true
             }
-
-            TouchPhase::Moved => {
-                let mut should_redraw = false;
-
+            GestureAction::DragStart { start } => {
+                *self.drag_state.lock() = Some((start.y, self.scroll.load(Ordering::Relaxed)));
+                true
+            }
+            GestureAction::DragMove { curr, .. } => {
+                // An armed reorder takes precedence over scrolling
                 if self.drag_info.lock().is_some() {
-                    if let Some(insert_idx) = self.get_selected_item_index(touch_pos.y) {
-                        let mut drag = self.drag_info.lock();
-                        if let Some(d) = drag.as_mut() {
-                            if d.insert_idx != insert_idx {
-                                d.insert_idx = insert_idx;
-                                info!(target: "app::menu", "insert_idx changed to: {}", insert_idx);
-                                should_redraw = true;
+                    if let Some(insert_idx) = self.get_selected_item_index(curr.y) {
+                        let should_redraw = {
+                            let mut drag = self.drag_info.lock();
+                            match drag.as_mut() {
+                                Some(d) if d.insert_idx != insert_idx => {
+                                    d.insert_idx = insert_idx;
+                                    info!(target: "app::menu", "insert_idx changed to: {}", insert_idx);
+                                    true
+                                }
+                                _ => false,
                             }
+                        };
+
+                        if should_redraw {
+                            self.invalidate_draw();
+                            self.redraw.trigger();
                         }
                     }
-                }
 
-                if should_redraw {
-                    let atom = &mut self.renderer.make_guard(gfxtag!("Menu::drag_update"));
-                    self.redraw(atom);
+                    return true
                 }
 
                 let scroll = {
-                    let mut touch_info = self.touch_info.lock();
-                    let Some(info) = &mut *touch_info else { return false };
-
-                    info.last_y = touch_pos.y;
-                    info.push_sample(touch_pos.y);
-
-                    let last_elapsed = info.last_instant.elapsed().as_millis();
-                    if last_elapsed <= 20 {
-                        return true
-                    }
-                    info.last_instant = std::time::Instant::now();
-
-                    let dist = touch_pos.y - info.start_pos.y;
-                    if dist.abs() < BIG_EPSILON {
-                        return true
-                    }
-
-                    info.start_scroll - dist
+                    let drag_state = self.drag_state.lock();
+                    let Some((start_y, start_scroll)) = *drag_state else { return false };
+                    start_scroll + start_y - curr.y
                 };
 
                 self.scrollview(scroll);
-                self.redraw_scroll(renderer);
+                self.redraw.trigger();
                 true
             }
+            GestureAction::DragEnd { vel, .. } => {
+                *self.drag_state.lock() = None;
 
-            // Use async handler instead
-            TouchPhase::Ended | TouchPhase::Cancelled => false,
-        }
-    }
-
-    async fn handle_touch(&self, phase: TouchPhase, id: u64, touch_pos: Point) -> bool {
-        if id != 0 {
-            return false
-        }
-
-        match phase {
-            // Should be handled by handle_touch_sync
-            TouchPhase::Started | TouchPhase::Moved => false,
-
-            TouchPhase::Ended | TouchPhase::Cancelled => {
+                // Flick inertia from the release velocity, reproducing
+                // the old dist-over-sample-window formula (px/ms).
+                let accel = self.scroll_start_accel.get() * -vel.y / 1000.;
+                self.speed.store(accel, Ordering::Relaxed);
+                self.motion_cv.notify();
+                true
+            }
+            GestureAction::Up { .. } => {
+                // Commit an armed reorder at touch end
                 let drag = self.drag_info.lock().take();
                 if let Some(drag_info) = drag {
                     if drag_info.item_idx != drag_info.insert_idx {
                         let item = self.items.get_str(drag_info.item_idx).unwrap();
-                        let atom = &mut self.renderer.make_guard(gfxtag!("Menu::reorder_item"));
+                        let atom = &mut self.redraw.make_guard(gfxtag!("Menu::reorder_item"));
                         self.items.remove_str(atom, Role::App, drag_info.item_idx).unwrap();
                         let insert_idx = drag_info.insert_idx;
                         self.items.insert_str(atom, Role::App, insert_idx, &item).unwrap();
@@ -1042,22 +1066,29 @@ impl UIObject for Menu {
                     return true
                 }
 
-                let (is_tap, is_long_press_tap, elapsed) = {
-                    let touch_info = self.touch_info.lock();
-                    let Some(info) = &*touch_info else { return true };
+                false
+            }
+            GestureAction::LongPress { .. } => {
+                // Enter edit mode while the finger is still down; the
+                // recognizer fires once per touch by construction.
+                if !self.is_edit_mode.load(Ordering::Relaxed) {
+                    self.save_items_layout();
+                    self.is_edit_mode.store(true, Ordering::Release);
+                    let node = self.node.upgrade().unwrap();
+                    node.trigger("edit_active", vec![]).await.unwrap();
+                    self.invalidate_draw();
+                    self.redraw.trigger();
+                }
+                true
+            }
+            GestureAction::Tap { pos } => {
+                // A stationary grab on the reorder handle is a no-op,
+                // not a selection (the old armed path suppressed it)
+                if self.drag_info.lock().is_some() {
+                    return true
+                }
 
-                    let is_tap = (touch_pos.y - info.start_pos.y).abs() < BIG_EPSILON;
-                    let movement_dist = ((touch_pos.x - info.start_pos.x).powi(2) +
-                        (touch_pos.y - info.start_pos.y).powi(2))
-                    .sqrt();
-                    let is_long_press_tap = movement_dist < LONG_PRESS_EPSILON;
-                    let elapsed = info.start_instant.elapsed().as_millis();
-                    (is_tap, is_long_press_tap, elapsed)
-                };
-
-                self.handle_interaction(touch_pos, is_tap, is_long_press_tap, elapsed).await;
-
-                self.end_touch_phase(touch_pos.y);
+                self.handle_interaction(pos, true, false, 0).await;
                 true
             }
         }

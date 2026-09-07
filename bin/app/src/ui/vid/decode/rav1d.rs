@@ -56,7 +56,7 @@ pub fn spawn_decoder_thread(
     path: String,
     vid_data: Arc<SyncMutex<Option<Av1VideoData>>>,
     renderer: Renderer,
-) -> std::thread::JoinHandle<()> {
+) {
     let mut settings = Rav1dSettings::new();
     // 0 is auto detect
     settings.set_n_threads(4);
@@ -137,7 +137,7 @@ pub fn spawn_decoder_thread(
                 }
             }
         }
-    })
+    });
 }
 
 fn process(
@@ -204,7 +204,7 @@ fn process(
     };
     if (*frame_idx % 10) == 0 {
         let pct_loaded = 100. * *frame_idx as f32 / num_frames as f32;
-        d!("Decoded video {pct_loaded:.2}%%");
+        d!("Decoded video {pct_loaded:.2}%");
     }
     *frame_idx += 1;
     Ok(())

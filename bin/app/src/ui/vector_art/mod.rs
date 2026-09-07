@@ -23,28 +23,30 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use crate::{
-    gfx::{gfxtag, DrawCall, DrawInstruction, DrawMesh, Point, Rectangle, RenderApi, Renderer},
+    gfx::{
+        gfxtag, DrawCall, DrawInstruction, DrawMesh, EpochCache, Rectangle, RenderApi, Renderer,
+    },
     prop::{
-        BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyFloat32, PropertyRect,
+        PropertyAtomicGuard, PropertyBool, PropertyFloat32, PropertyRect, PropertyShape,
         PropertyUint32, Role,
     },
     scene::{Pimpl, SceneNodeWeak},
     ExecutorPtr,
 };
 
-use super::{DrawUpdate, OnModify, UIObject};
+use super::{DrawUpdate, OnModify, RedrawTrigger, UIObject};
 
 pub mod shape;
-use shape::VectorShape;
 
 pub type VectorArtPtr = Arc<VectorArt>;
 
 pub struct VectorArt {
     node: SceneNodeWeak,
     renderer: Renderer,
+    redraw: RedrawTrigger,
     tasks: SyncMutex<Vec<smol::Task<()>>>,
 
-    shape: VectorShape,
+    shape: PropertyShape,
     dc_key: u64,
 
     is_visible: PropertyBool,
@@ -53,21 +55,29 @@ pub struct VectorArt {
     z_index: PropertyUint32,
     priority: PropertyUint32,
 
-    parent_rect: SyncMutex<Option<Rectangle>>,
+    /// Cached draw instructions. Empty means the output is stale and must
+    /// be recomputed by the draw pass. Entries from a dead UI epoch are
+    /// evicted automatically. Visibility, rect, scale, z_index and shape
+    /// changes invalidate it.
+    draw_cache: EpochCache<Vec<DrawInstruction>>,
 }
 
 impl VectorArt {
-    pub async fn new(node: SceneNodeWeak, shape: VectorShape, renderer: Renderer) -> Pimpl {
+    pub async fn new(node: SceneNodeWeak, renderer: Renderer, redraw: RedrawTrigger) -> Pimpl {
         let node_ref = &node.upgrade().unwrap();
         let is_visible = PropertyBool::wrap(node_ref, Role::Internal, "is_visible", 0).unwrap();
+        let shape = PropertyShape::wrap(node_ref, Role::Internal, "shape", 0).unwrap();
         let rect = PropertyRect::wrap(node_ref, Role::Internal, "rect").unwrap();
         let scale = PropertyFloat32::wrap(node_ref, Role::Internal, "scale", 0).unwrap();
         let z_index = PropertyUint32::wrap(node_ref, Role::Internal, "z_index", 0).unwrap();
         let priority = PropertyUint32::wrap(node_ref, Role::Internal, "priority", 0).unwrap();
 
+        let draw_cache = EpochCache::new(&renderer);
+
         let self_ = Arc::new(Self {
             node,
             renderer,
+            redraw,
             tasks: SyncMutex::new(vec![]),
 
             shape,
@@ -79,25 +89,10 @@ impl VectorArt {
             z_index,
             priority,
 
-            parent_rect: SyncMutex::new(None),
+            draw_cache,
         });
 
         Pimpl::VectorArt(self_)
-    }
-
-    #[instrument(target = "ui::vector_art")]
-    async fn redraw(self: Arc<Self>, batch: BatchGuardPtr) {
-        let Some(parent_rect) = self.parent_rect.lock().clone() else {
-            warn!(target: "ui:vector_art", "Skip draw since parent rect is empty");
-            return
-        };
-
-        let atom = &mut batch.spawn();
-        let Some(draw_update) = self.get_draw_calls(atom, parent_rect) else {
-            error!(target: "ui:vector_art", "Mesh failed to draw");
-            return
-        };
-        self.renderer.replace_draw_calls(Some(batch.id), draw_update.draw_calls);
     }
 
     fn get_draw_instrs(&self) -> Vec<DrawInstruction> {
@@ -108,9 +103,16 @@ impl VectorArt {
 
         let rect = self.rect.get();
         let scale = self.scale.get();
-        let mut verts = self.shape.eval(rect.w, rect.h).expect("bad shape");
-        let indices = self.shape.indices.clone();
-        let num_elements = self.shape.indices.len() as i32;
+        let shape = self.shape.get();
+        let mut verts = match shape.eval(rect.w, rect.h) {
+            Ok(verts) => verts,
+            Err(e) => {
+                warn!(target: "ui::vector_art", "Shape eval failure: {e}");
+                return vec![]
+            }
+        };
+        let indices = shape.indices.clone();
+        let num_elements = shape.indices.len() as i32;
 
         // Apply scaling
         for v in &mut verts {
@@ -131,11 +133,25 @@ impl VectorArt {
         atom: &mut PropertyAtomicGuard,
         parent_rect: Rectangle,
     ) -> Option<DrawUpdate> {
+        // The rect property is its own memo: its stored value is the result
+        // of the last eval. Compare before/after to detect geometry changes
+        // without a separate last_rect field.
+        let prev_rect = self.rect.get();
         if let Err(e) = self.rect.eval(atom, &parent_rect) {
             warn!(target: "ui::vector_art", "Rect eval failure: {e}");
             return None
         }
-        let instrs = self.get_draw_instrs();
+        let rect_changed = self.rect.get() != prev_rect;
+
+        // Compute under the cache lock: the compute is synchronous, so a
+        // concurrent invalidation either lands before us (we see None and
+        // recompute with the newer state) or after us (it clears our result
+        // and the trailing pass recomputes). No lost invalidation.
+        if rect_changed {
+            self.draw_cache.clear();
+        }
+        let instrs = self.draw_cache.get_or_insert_with(|| self.get_draw_instrs());
+
         Some(DrawUpdate {
             key: self.dc_key,
             draw_calls: vec![(
@@ -156,17 +172,36 @@ impl UIObject for VectorArt {
         let me = Arc::downgrade(&self);
 
         let mut on_modify = OnModify::new(ex, self.node.clone(), me.clone());
-        on_modify.when_change(self.is_visible.prop(), Self::redraw);
-        on_modify.when_change(self.rect.prop(), Self::redraw);
-        on_modify.when_change(self.scale.prop(), Self::redraw);
-        on_modify.when_change(self.z_index.prop(), Self::redraw);
+        // Invalidate the cache, then request a pass. Internal-role echoes
+        // (the pass's own evals) are skipped: reacting to them would queue
+        // a pass for every pass, forever.
+        on_modify.when_change_external(self.is_visible.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.shape.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.rect.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.scale.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.z_index.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
 
         *self.tasks.lock() = on_modify.tasks;
     }
 
     fn stop(&self) {
         self.tasks.lock().clear();
-        *self.parent_rect.lock() = None;
+        self.draw_cache.clear();
     }
 
     #[instrument(target = "ui::vector_art")]
@@ -175,16 +210,13 @@ impl UIObject for VectorArt {
         parent_rect: Rectangle,
         atom: &mut PropertyAtomicGuard,
     ) -> Option<DrawUpdate> {
-        *self.parent_rect.lock() = Some(parent_rect);
         self.get_draw_calls(atom, parent_rect)
     }
 }
 
 impl Drop for VectorArt {
     fn drop(&mut self) {
-        let atom = self.renderer.make_guard(gfxtag!("VectorArt::drop"));
-        self.renderer
-            .replace_draw_calls(Some(atom.batch_id), vec![(self.dc_key, Default::default())]);
+        self.renderer.replace_draw_calls(vec![(self.dc_key, Default::default())]);
     }
 }
 

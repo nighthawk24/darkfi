@@ -22,14 +22,13 @@ use crate::{
         schema::COLOR_SCHEME,
         App,
     },
-    clipboard, expr,
-    gfx::gfxtag,
+    expr,
     mesh::COLOR_CYAN,
-    prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, PropertyStr, Role},
+    prop::{PropertyAtomicGuard, PropertyFloat32, PropertyStr, Role},
     scene::{SceneNodePtr, Slot},
     shape,
     ui::{Button, Layer, Text, VectorArt},
-    util::i18n::I18nBabelFish,
+    util::{clipboard, i18n::I18nBabelFish},
 };
 
 use super::{super::ColorScheme, data::*, util::*};
@@ -46,8 +45,6 @@ pub async fn make(
     cc.add_const_f32("PADDING_Y", PADDING_Y);
     cc.add_const_f32("COPY_WIDTH", COPY_WIDTH);
 
-    let main_layer = wallet_layer.lookup_node("/main_layer").unwrap();
-
     // Receive layer
     let receive_layer = create_layer("receive_layer");
     let prop = receive_layer.get_property("rect").unwrap();
@@ -57,51 +54,15 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     receive_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     receive_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let receive_layer = receive_layer.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let receive_layer = receive_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     wallet_layer.link(receive_layer.clone());
 
     create_bg_mesh(app, atom, &receive_layer, "receive_bg").await;
     create_header_bg(app, atom, &receive_layer, "receive_header_bg").await;
 
-    // Back button
-    let node = create_vector_art("receive_back_btn_bg");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, BACKARROW_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, BACKARROW_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let shape = shape::create_back_arrow().scaled(BACKARROW_SCALE);
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
-    receive_layer.link(node);
-
     let mut y = 0.;
-
-    let node = create_button("receive_back_btn");
-    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, y).unwrap();
-    prop.set_f32(atom, Role::App, 2, WALLET_BTN_SIZE * 2.).unwrap();
-    prop.set_f32(atom, Role::App, 3, HEADER_HEIGHT).unwrap();
-
-    let main_is_visible = PropertyBool::wrap(&main_layer, Role::App, "is_visible", 0).unwrap();
-    let receive_is_visible =
-        PropertyBool::wrap(&receive_layer, Role::App, "is_visible", 0).unwrap();
-    let renderer = app.renderer.clone();
-    let (slot, recvr) = Slot::new("receive_back_clicked");
-    node.register("click", slot).unwrap();
-    let listen_click = app.ex.spawn(async move {
-        while let Ok(_) = recvr.recv().await {
-            let atom = &mut renderer.make_guard(gfxtag!("receive back button"));
-            receive_is_visible.set(atom, false);
-            main_is_visible.set(atom, true);
-        }
-    });
-    app.tasks.lock().unwrap().push(listen_click);
-
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
-    receive_layer.link(node);
 
     y += HEADER_HEIGHT;
 
@@ -146,7 +107,15 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     receive_layer.link(node);
 
@@ -162,7 +131,9 @@ pub async fn make(
     prop.add_depend(&addr_h_prop, 0, "addr_height");
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let shape = shape::create_copy(COLOR_CYAN).scaled(COPY_SCALE);
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     receive_layer.link(node);
 
     let node = create_button("receive_copy_btn");
@@ -197,7 +168,8 @@ pub async fn make(
     });
     app.tasks.lock().unwrap().push(listen_click);
 
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     receive_layer.link(node);
 
     // Create tooltip

@@ -34,7 +34,7 @@ extern crate tracing;
 mod android;
 mod app;
 mod build_info;
-mod clipboard;
+mod db;
 mod error;
 mod expr;
 mod gfx;
@@ -48,6 +48,8 @@ mod pubsub;
 //mod py;
 //mod ringbuf;
 mod scene;
+mod setting;
+mod sfx;
 mod shape;
 mod text;
 mod ui;
@@ -55,21 +57,26 @@ mod util;
 
 use crate::{
     app::{App, AppPtr},
+    db::{AppDb, AppDbPtr},
     gfx::EpochIndex,
     prop::{Property, PropertySubType, PropertyType},
     scene::{CallArgType, SceneNode, SceneNodePtr, SceneNodeType},
+    ui::RedrawTrigger,
     util::AsyncRuntime,
 };
 #[cfg(feature = "enable-netdebug")]
 use net::ZeroMQAdapter;
 use {
+    app::schema::get_main_db_path,
     // Local imports
+    db::get_app_db_path,
     gfx::Renderer,
+    // Global imports
+    kvdb_overlay::Database as KvDb,
     prop::{PropertyBool, PropertyStr, Role},
     scene::Slot,
     std::io::Cursor,
     ui::chatview,
-    // Global imports
     url::Url,
 };
 
@@ -82,7 +89,19 @@ macro_rules! i { ($($arg:tt)*) => { trace!(target: "main", $($arg)*); } }
 
 fn panic_hook(panic_info: &std::panic::PanicHookInfo) {
     error!("panic occurred: {panic_info}");
-    error!("{}", std::backtrace::Backtrace::force_capture().to_string());
+    let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+    error!("{backtrace}");
+
+    if let Some(logfile_path) = logger::cached_logfile_path() {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let report = format!("[{timestamp}] PANIC: {panic_info}\n{backtrace}\n");
+        let _ = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(logfile_path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, report.as_bytes()));
+    }
+
     std::process::abort()
 }
 
@@ -115,6 +134,9 @@ struct God {
 
 impl God {
     fn new() -> Self {
+        #[cfg(feature = "enable-filelog")]
+        logger::init_logfile_path();
+
         // Abort the application on panic right away
         std::panic::set_hook(Box::new(panic_hook));
 
@@ -137,6 +159,12 @@ impl God {
         let basename = exe_path.parent().unwrap();
         std::env::set_current_dir(basename).unwrap();
 
+        let db_path = get_main_db_path();
+        let kv_db = KvDb::open_default(&db_path).expect("KVDB failed to open");
+        let app_db_path = get_app_db_path();
+        let app_db = smol::block_on(AppDb::new(app_db_path.to_str().unwrap()))
+            .expect("turso app db failed to open");
+
         let bg_ex = Arc::new(smol::Executor::new());
         let fg_ex = Arc::new(smol::Executor::new());
         let sg_root = SceneNode::root();
@@ -157,8 +185,10 @@ impl God {
         let app2 = app.clone();
         let cv_app_is_setup = Arc::new(CondVar::new());
         let cv = cv_app_is_setup.clone();
+        let kv_db2 = kv_db.clone();
+        let app_db2 = app_db.clone();
         let app_task = fg_ex.spawn(async move {
-            app2.setup().await.unwrap();
+            app2.setup(kv_db2, app_db2).await;
             cv.notify();
         });
         fg_runtime.push_task(app_task);
@@ -167,10 +197,11 @@ impl God {
         {
             let sg_root = sg_root.clone();
             let ex = bg_ex.clone();
-            let renderer = renderer.clone();
+            let renderer = app.renderer.clone();
+            let redraw = app.redraw_trigger.clone();
             let zmq_task = bg_ex.spawn(async {
                 i!("Enabled net debugging backend in this build");
-                let zmq_rpc = ZeroMQAdapter::new(sg_root, renderer, ex).await;
+                let zmq_rpc = ZeroMQAdapter::new(sg_root, renderer, redraw, ex).await;
                 zmq_rpc.run().await;
             });
             bg_runtime.push_task(zmq_task);
@@ -179,9 +210,9 @@ impl God {
         {
             let ex = bg_ex.clone();
             let cv = cv_app_is_setup.clone();
-            let renderer = renderer.clone();
+            let redraw = app.redraw_trigger.clone();
             let plug_task = bg_ex.spawn(async move {
-                load_plugins(ex, sg_root, renderer, cv).await;
+                load_plugins(ex, sg_root, redraw, cv, kv_db, app_db).await;
             });
             bg_runtime.push_task(plug_task);
         }
@@ -232,13 +263,10 @@ impl God {
             cv.wait().await;
             app.start(event_pub, epoch).await;
         });
-
-        self.app.notify_start();
     }
 
     /// Put the app to sleep until the next restart.
     pub fn stop_app(&self) {
-        self.app.notify_stop();
         self.fg_runtime.stop();
         self.app.stop();
         info!(target: "main", "App stopped");
@@ -256,8 +284,10 @@ static GOD: OnceLock<God> = OnceLock::new();
 async fn load_plugins(
     ex: ExecutorPtr,
     sg_root: SceneNodePtr,
-    renderer: Renderer,
+    redraw: RedrawTrigger,
     cv: Arc<CondVar>,
+    kv_db: KvDb,
+    app_db: AppDbPtr,
 ) {
     let plugin = SceneNode::new("plugin", SceneNodeType::PluginRoot);
     let plugin = plugin.setup_null();
@@ -273,7 +303,7 @@ async fn load_plugins(
         let darkirc = create_darkirc("darkirc");
         let darkirc = darkirc
             .setup(|me| async {
-                plugin::DarkIrc2::new(me, sg_root.clone(), ex.clone())
+                plugin::DarkIrc::new(me, sg_root.clone(), ex.clone(), kv_db, app_db)
                     .await
                     .expect("DarkIrc pimpl setup")
             })
@@ -283,10 +313,10 @@ async fn load_plugins(
         darkirc.register("recv", slot).unwrap();
         let sg_root2 = sg_root.clone();
         let darkirc_nick = PropertyStr::wrap(&darkirc, Role::App, "nick", 0).unwrap();
-        let renderer2 = renderer.clone();
+        let redraw2 = redraw.clone();
         let listen_recv = ex.spawn(async move {
         while let Ok(data) = recvr.recv().await {
-            let atom = &mut renderer2.make_guard(gfxtag!("darkirc msg recv"));
+            let atom = &mut redraw2.make_guard(gfxtag!("darkirc msg recv"));
 
             let mut cur = Cursor::new(&data);
             let channel = String::decode(&mut cur).unwrap();
@@ -295,48 +325,38 @@ async fn load_plugins(
             let nick = String::decode(&mut cur).unwrap();
             let msg = String::decode(&mut cur).unwrap();
 
-            let node_path = format!("/window/content/{channel}_chat_layer/content/chatty");
+            let node_path = "/window/content/chat/main_chat_layer/content/chatty";
             t!("Attempting to relay message to {node_path}");
-            let Some(chatview) = sg_root2.lookup_node(&node_path) else {
-                d!("Ignoring message since {node_path} doesn't exist");
-                continue
-            };
+            let chatview = sg_root2.lookup_node(node_path).unwrap();
 
-            // I prefer to just re-encode because the code is clearer.
+            // The chatview routes: active channel inserts live, anything
+            // else persists to its own tree.
             let mut data = vec![];
+            channel.encode(&mut data).unwrap();
             timestamp.encode(&mut data).unwrap();
             id.encode(&mut data).unwrap();
             nick.encode(&mut data).unwrap();
             msg.encode(&mut data).unwrap();
-            if let Err(err) = chatview.call_method("insert_line", data).await {
-                error!(
-                    target: "app",
-                    "Call method {node_path}::insert_line({timestamp}, {id}, {nick}, '{msg}'): {err:?}"
-                );
+            if let Err(err) = chatview.call_method("receive", data).await {
+                error!(target: "app", "Call method {node_path}::receive({channel}, {timestamp}, {id}): {err:?}");
             }
 
-            // Apply coloring when you get a message
-            let chat_path = format!("/window/content/{channel}_chat_layer");
-            let chat_layer = sg_root2.lookup_node(chat_path).unwrap();
-            if chat_layer.get_property_bool("is_visible").unwrap() {
+            // Apply coloring when the message is not being viewed:
+            // either another channel is open, or the user is not in the
+            // chat screen at all.
+            let chat_layer = sg_root2.lookup_node("/window/content/chat/main_chat_layer").unwrap();
+            let viewing = chat_layer.get_property_bool("is_visible").unwrap() &&
+                chatview.get_property_str("channel").unwrap_or_default() == channel;
+            if viewing {
                 continue
             }
 
-            let node_path = format!("/window/content/menu_layer/{channel}_channel_label");
-            let menu_label = sg_root2.lookup_node(&node_path).unwrap();
-            let prop = menu_label.get_property("text_color").unwrap();
-            if msg.contains(&darkirc_nick.get()) {
-                // Nick highlight
-                prop.set_f32(atom, Role::App, 0, 0.56).unwrap();
-                prop.set_f32(atom, Role::App, 1, 0.61).unwrap();
-                prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-                prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-            } else {
-                // Normal channel activity
-                prop.set_f32(atom, Role::App, 0, 0.36).unwrap();
-                prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-                prop.set_f32(atom, Role::App, 2, 0.51).unwrap();
-                prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+            let menu_node =
+                sg_root2.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
+            let group_name = if msg.contains(&darkirc_nick.get()) { "role2_group" } else { "role1_group" };
+            let group = menu_node.get_property(group_name).unwrap();
+            if !group.get_str_vec().unwrap().contains(&channel) {
+                group.push_str(atom, Role::App, &channel).unwrap();
             }
         }
     });
@@ -344,12 +364,12 @@ async fn load_plugins(
         let (slot, recvr) = Slot::new("connect");
         darkirc.register("connect", slot).unwrap();
         let sg_root2 = sg_root.clone();
-        let renderer2 = renderer.clone();
+        let redraw2 = redraw.clone();
         let listen_connect = ex.spawn(async move {
-            let net0 = sg_root2.lookup_node("/window/content/netstatus_layer/net0").unwrap();
-            let net1 = sg_root2.lookup_node("/window/content/netstatus_layer/net1").unwrap();
-            let net2 = sg_root2.lookup_node("/window/content/netstatus_layer/net2").unwrap();
-            let net3 = sg_root2.lookup_node("/window/content/netstatus_layer/net3").unwrap();
+            let net0 = sg_root2.lookup_node("/window/content/chat/netstatus_layer/net0").unwrap();
+            let net1 = sg_root2.lookup_node("/window/content/chat/netstatus_layer/net1").unwrap();
+            let net2 = sg_root2.lookup_node("/window/content/chat/netstatus_layer/net2").unwrap();
+            let net3 = sg_root2.lookup_node("/window/content/chat/netstatus_layer/net3").unwrap();
 
             let net0_is_visible = PropertyBool::wrap(&net0, Role::App, "is_visible", 0).unwrap();
             let net1_is_visible = PropertyBool::wrap(&net1, Role::App, "is_visible", 0).unwrap();
@@ -359,7 +379,7 @@ async fn load_plugins(
             while let Ok(data) = recvr.recv().await {
                 let (peers_count, is_dag_synced): (u32, bool) = deserialize(&data).unwrap();
 
-                let atom = &mut renderer2.make_guard(gfxtag!("netstatus change"));
+                let atom = &mut redraw2.make_guard(gfxtag!("netstatus change"));
 
                 if peers_count == 0 {
                     net0_is_visible.set(atom, true);
@@ -415,16 +435,17 @@ async fn load_plugins(
         let sg_root2 = sg_root.clone();
         let listen_file_status = ex.spawn(async move {
             while let Ok(data) = recv.recv().await {
-                let window = sg_root2.lookup_node("/window/content").unwrap();
                 let mut cur = Cursor::new(&data);
                 let url = Url::decode(&mut cur).unwrap();
-                let status = chatview::FileMessageStatus::decode(&mut cur).unwrap();
-                for child in window.get_children() {
-                    if let Some(chatty) = child.lookup_node("/content/chatty") {
+                let status = chatview::msg::filemsg::FileMsgStatus::decode(&mut cur).unwrap();
+                if let Some(chatty) =
+                    sg_root2.lookup_node("/window/content/chat/main_chat_layer/content/chatty")
+                {
+                    if let Some(filemsg) = chatty.lookup_node("/filemsg") {
                         let mut data = vec![];
                         url.encode(&mut data).unwrap();
                         status.encode(&mut data).unwrap();
-                        let _ = chatty.call_method("set_file_status", data).await;
+                        let _ = filemsg.call_method("set_file_status", data).await;
                     }
                 }
             }
@@ -449,7 +470,7 @@ async fn load_plugins(
         let (slot, recvr) = Slot::new("connect");
         drk.register("connect", slot).unwrap();
         let sg_root2 = sg_root.clone();
-        let renderer2 = renderer.clone();
+        let redraw2 = redraw.clone();
         let listen_connect = ex.spawn(async move {
             let net0 = sg_root2.lookup_node("/window/content/wallet/netstatus_layer/net0").unwrap();
             let net1 = sg_root2.lookup_node("/window/content/wallet/netstatus_layer/net1").unwrap();
@@ -462,8 +483,14 @@ async fn load_plugins(
             let net3_is_visible = PropertyBool::wrap(&net3, Role::App, "is_visible", 0).unwrap();
 
             while let Ok(data) = recvr.recv().await {
-                let status: u8 = deserialize(&data).unwrap();
-                let atom = &mut renderer2.make_guard(gfxtag!("blockchain netstatus change"));
+                let (status, desc): (u8, String) = deserialize(&data).unwrap();
+                let atom = &mut redraw2.make_guard(gfxtag!("blockchain netstatus change"));
+
+                if let Some(progress_node) =
+                    sg_root2.lookup_node("/window/content/wallet/netstatus_layer/progress")
+                {
+                    progress_node.set_property_str(atom, Role::App, "text", &desc).unwrap();
+                }
 
                 match status {
                     1 => {
@@ -497,96 +524,84 @@ async fn load_plugins(
         let (slot, recv) = Slot::new("balances_update");
         let _ = drk.register("balances_updated", slot);
         let sg_root2 = sg_root.clone();
-        let renderer2 = renderer.clone();
+        let redraw2 = redraw.clone();
         let drk_node2 = drk.clone();
         let listen_balances = ex.spawn(async move {
             use crate::ui::TokenRow;
             use darkfi_money_contract::model::TokenId;
             use darkfi_serial::Encodable;
 
-            let update = async || {
+            let update = async |data: Vec<u8>| {
                 d!("drk balances_updated signal received");
 
-                // Fetch and update main wallet tokens table
-                if let Ok(Some(response_data)) = drk_node2.call_method("get_balances", vec![]).await
-                {
-                    let atom = &mut renderer2.make_guard(gfxtag!("wallet - refresh tokens"));
+                let mut cur = std::io::Cursor::new(data);
+                if let Ok(balances) = Vec::<(String, TokenId, u64)>::decode(&mut cur) {
+                    let atom = &mut redraw2.make_guard(gfxtag!("wallet - refresh tokens"));
 
-                    let mut cur = std::io::Cursor::new(response_data);
-                    if let Ok(balances) = Vec::<(String, TokenId, u64)>::decode(&mut cur) {
-                        let token_rows: Vec<TokenRow> = balances
-                            .iter()
-                            .map(|(symbol, token_id, balance)| TokenRow {
-                                id: *token_id,
-                                symbol: symbol.clone(),
-                                balance: encode_base10(*balance, 8),
-                            })
-                            .collect();
+                    let token_rows: Vec<TokenRow> = balances
+                        .iter()
+                        .map(|(symbol, token_id, balance)| TokenRow {
+                            id: *token_id,
+                            symbol: symbol.clone(),
+                            balance: encode_base10(*balance, 8),
+                        })
+                        .collect();
 
-                        let mut data: Vec<u8> = vec![];
-                        for row in &token_rows {
-                            let _ = TokenRow::encode(row, &mut data);
-                        }
+                    let mut rows_data: Vec<u8> = vec![];
+                    for row in &token_rows {
+                        let _ = TokenRow::encode(row, &mut rows_data);
+                    }
 
-                        if let Some(tokens_table) =
-                            sg_root2.lookup_node("/window/content/wallet/main_layer/tokens_table")
-                        {
-                            let _ = tokens_table.call_method("set_tokens", data.clone()).await;
-                        }
+                    let tokens_table = sg_root2
+                        .lookup_node("/window/content/wallet/main_layer/tokens_table")
+                        .unwrap();
+                    let send_tokens_table = sg_root2
+                        .lookup_node("/window/content/wallet/send_step1_layer/tokens_table")
+                        .unwrap();
 
-                        if let Some(send_tokens_table) = sg_root2
-                            .lookup_node("/window/content/wallet/send_step1_layer/tokens_table")
-                        {
-                            let _ = send_tokens_table.call_method("set_tokens", data).await;
-                        }
+                    tokens_table.call_method("set_tokens", rows_data.clone()).await.unwrap();
+                    send_tokens_table.call_method("set_tokens", rows_data).await.unwrap();
 
-                        // Update main wallet balance
-                        if let Some(drk_row) =
-                            token_rows.iter().find(|row| row.id == *DARK_TOKEN_ID)
-                        {
-                            if let Some(balance_node) = sg_root2
-                                .lookup_node("/window/content/wallet/main_layer/wallet_balance")
-                            {
-                                balance_node
-                                    .set_property_str(
-                                        atom,
-                                        Role::App,
-                                        "text",
-                                        format!("DRK {}", drk_row.balance),
-                                    )
-                                    .unwrap();
-                            }
-                        }
+                    // Update main wallet balance
+                    if let Some(drk_row) = token_rows.iter().find(|row| row.id == *DARK_TOKEN_ID) {
+                        let balance_node = sg_root2
+                            .lookup_node("/window/content/wallet/main_layer/wallet_balance")
+                            .unwrap();
+                        balance_node
+                            .set_property_str(
+                                atom,
+                                Role::App,
+                                "text",
+                                format!("DRK {}", drk_row.balance),
+                            )
+                            .unwrap();
+                    }
 
-                        if let Some(tx_status_layer) =
-                            sg_root2.lookup_node("/window/content/wallet/tx_status_layer")
-                        {
-                            let tx_id = tx_status_layer.get_property_str("tx_id").unwrap();
-                            if !tx_id.is_empty() {
-                                let mut tx_id_data = vec![];
-                                tx_id.encode(&mut tx_id_data).unwrap();
-                                if let Ok(Some(data)) =
-                                    drk_node2.call_method("get_tx_status", tx_id_data).await
-                                {
-                                    let mut cur = std::io::Cursor::new(data);
-                                    let status_text = String::decode(&mut cur).unwrap();
-                                    if let Some(status_node) =
-                                        tx_status_layer.lookup_node("/status")
-                                    {
-                                        status_node
-                                            .set_property_str(atom, Role::App, "text", status_text)
-                                            .unwrap();
-                                    }
-                                }
-                            }
-                        }
+                    let tx_status_layer =
+                        sg_root2.lookup_node("/window/content/wallet/tx_status_layer").unwrap();
+                    let tx_id = tx_status_layer.get_property_str("tx_id").unwrap();
+                    if !tx_id.is_empty() {
+                        let mut tx_id_data = vec![];
+                        tx_id.encode(&mut tx_id_data).unwrap();
+                        let status_data = drk_node2
+                            .call_method("get_tx_status", tx_id_data)
+                            .await
+                            .unwrap()
+                            .unwrap();
+
+                        let mut cur = std::io::Cursor::new(status_data);
+                        let status_text = String::decode(&mut cur).unwrap();
+                        let status_node = tx_status_layer.lookup_node("/status").unwrap();
+                        status_node.set_property_str(atom, Role::App, "text", status_text).unwrap();
                     }
                 }
             };
 
-            update().await;
-            while let Ok(_) = recv.recv().await {
-                update().await;
+            let response_data =
+                drk_node2.call_method("get_balances", vec![]).await.unwrap().unwrap();
+            update(response_data).await;
+            while let Ok(data) = recv.recv().await {
+                update(data).await;
             }
         });
 
@@ -607,7 +622,7 @@ async fn load_plugins(
         let (slot, recv) = Slot::new("tx_built");
         let _ = drk.register("tx_built", slot);
         let sg_root2 = sg_root.clone();
-        let renderer2 = renderer.clone();
+        let redraw2 = redraw.clone();
         let listen_tx_built = ex.spawn(async move {
             while let Ok(data) = recv.recv().await {
                 let mut cur = std::io::Cursor::new(data);
@@ -619,7 +634,7 @@ async fn load_plugins(
                 let tx = Transaction::decode(&mut cur).unwrap();
 
                 // Update tx_status_layer with built transaction
-                let atom = &mut renderer2.make_guard(gfxtag!("tx built"));
+                let atom = &mut redraw2.make_guard(gfxtag!("tx built"));
                 if let Some(tx_status) =
                     sg_root2.lookup_node("/window/content/wallet/tx_status_layer")
                 {
@@ -659,12 +674,12 @@ async fn load_plugins(
         let (slot, recv) = Slot::new("tx_built_error");
         let _ = drk.register("tx_built_error", slot);
         let sg_root2 = sg_root.clone();
-        let renderer2 = renderer.clone();
+        let redraw2 = redraw.clone();
         let listen_tx_built_error = ex.spawn(async move {
             while let Ok(data) = recv.recv().await {
                 let mut cur = std::io::Cursor::new(data);
                 let error_message = String::decode(&mut cur).unwrap();
-                let atom = &mut renderer2.make_guard(gfxtag!("tx built error"));
+                let atom = &mut redraw2.make_guard(gfxtag!("tx built error"));
 
                 // Display error message in step3
                 if let Some(error_node) =
@@ -738,6 +753,20 @@ pub fn create_darkirc(name: &str) -> SceneNode {
     prop.set_defaults_str(vec!["anon".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
+    let mut prop = Property::new("dm_public", PropertyType::Str, PropertySubType::Null);
+    prop.set_ui_text("DM Public Key", "Your DM public key (share with contacts)");
+    prop.allow_null_values();
+    prop.set_defaults_null().unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new("outbound_peers", PropertyType::Str, PropertySubType::Null);
+    prop.set_ui_text("Outbound Peers", "Connected outbound peers");
+    #[cfg(feature = "enable-plugin-darkirc")]
+    prop.set_array_len(plugin::darkirc::P2P_OUTBOUND_ACTIVE);
+    prop.allow_null_values();
+    prop.set_defaults_null().unwrap();
+    node.add_property(prop).unwrap();
+
     node.add_signal(
         "recv",
         "Message received",
@@ -768,7 +797,7 @@ pub fn create_darkirc(name: &str) -> SceneNode {
     )
     .unwrap();
 
-    node.add_method("reconnect", vec![], None).unwrap();
+    node.add_method("rescan", vec![("channel", "Channel", CallArgType::Str)], None).unwrap();
 
     node
 }
@@ -800,8 +829,11 @@ pub fn create_drk(name: &str) -> SceneNode {
 
     node.add_signal(
         "connect",
-        "Connections and disconnects",
-        vec![("connected", "Is darkfid connected", CallArgType::Bool)],
+        "Darkfid connection update",
+        vec![
+            ("status", "Connection status", CallArgType::Uint32),
+            ("description", "Description", CallArgType::Str),
+        ],
     )
     .unwrap();
 
@@ -844,7 +876,16 @@ pub fn create_drk(name: &str) -> SceneNode {
     )
     .unwrap();
 
-    node.add_signal("balances_updated", "Balances changed", vec![]).unwrap();
+    node.add_signal(
+        "balances_updated",
+        "Balances changed",
+        vec![
+            ("symbol", "Token symbol", CallArgType::Str),
+            ("token_id", "Token ID", CallArgType::Hash),
+            ("balance", "Token balance", CallArgType::Uint64),
+        ],
+    )
+    .unwrap();
 
     node.add_signal(
         "tx_updated",

@@ -18,16 +18,34 @@
 
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
-use miniquad::{KeyCode, KeyMods, MouseButton, TouchPhase};
-use std::sync::{Arc, Weak};
+use miniquad::{KeyCode, KeyMods, MouseButton};
+use std::sync::{Arc, OnceLock, Weak};
 
 use crate::{
-    gfx::{DrawCall, Point, Rectangle, RendererSync},
+    gfx::{DrawCall, Point, Rectangle},
     prop::{BatchGuardPtr, ModifyAction, PropertyAtomicGuard, PropertyPtr, Role},
     scene::{Pimpl, SceneNode as SceneNode3, SceneNodePtr, SceneNodeWeak},
     util::i18n::I18nBabelFish,
     ExecutorPtr,
 };
+
+static LONG_PRESS_TIMEOUT: OnceLock<u32> = OnceLock::new();
+
+/// The system long-press timeout in milliseconds. Queried once from
+/// `ViewConfiguration.getLongPressTimeout()` on Android, defaults to 400
+/// on other platforms.
+pub fn long_press_timeout() -> u32 {
+    *LONG_PRESS_TIMEOUT.get_or_init(|| {
+        #[cfg(target_os = "android")]
+        {
+            crate::android::get_long_press_timeout()
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            400
+        }
+    })
+}
 
 mod button;
 pub use button::{Button, ButtonPtr};
@@ -39,8 +57,15 @@ mod edit;
 pub use edit::{BaseEdit, BaseEditPtr, BaseEditType};
 pub mod emoji_picker;
 pub use emoji_picker::{EmojiPicker, EmojiPickerPtr};
-mod gesture;
-pub use gesture::GesturePtr;
+pub mod gesture;
+// The full config vocabulary is re-exported for widgets adopting
+// per-node recognizer configs (TapCfg/DragCfg axes + direction); the
+// crate is a binary so not every name has an in-crate use yet.
+#[allow(unused_imports)]
+pub use gesture::{
+    Axes, Direction, DragCfg, GestureAction, GestureConstants, GestureSession, GestureSessionPtr,
+    GestureSet, GestureTarget, LongPressCfg, TapCfg,
+};
 mod image;
 #[allow(unused_imports)]
 pub use image::{Image, ImagePtr};
@@ -62,11 +87,69 @@ mod menu;
 pub use menu::{Menu, MenuPtr};
 mod text;
 pub use text::{Text, TextPtr};
+mod text_scramble;
+pub use text_scramble::{TextScramble, TextScramblePtr};
 mod win;
-pub use win::{GestureAction, Window, WindowPtr};
+pub use win::{Window, WindowPtr};
 
 macro_rules! e { ($($arg:tt)*) => { error!(target: "scene::on_modify", $($arg)*); } }
 macro_rules! t { ($($arg:tt)*) => { trace!(target: "scene::on_modify", $($arg)*); } }
+
+/// Handle for requesting a redraw pass from the root window's draw loop.
+/// Cheap to clone. The underlying queue is bounded(1), so triggers sent
+/// while a pass is running or pending are coalesced into a single
+/// additional pass. Property mutations SHOULD be made through
+/// `make_guard()` so the trigger fires once, after the whole update
+/// chain has settled. State mutations must happen before calling
+/// `trigger()` so the resulting pass observes them.
+#[derive(Clone)]
+pub struct RedrawTrigger(async_channel::Sender<()>);
+
+impl RedrawTrigger {
+    /// Create the trigger handle and the receiver consumed by the draw loop.
+    pub fn new() -> (Self, async_channel::Receiver<()>) {
+        let (tx, rx) = async_channel::bounded(1);
+        (Self(tx), rx)
+    }
+
+    /// Request a draw pass without a batch scope. Only for mutations that
+    /// need no `PropertyAtomicGuard` (plain fields, caches): the trigger is
+    /// enqueued immediately, so all state must already be settled. For
+    /// property updates use `make_guard()` instead, which defers the
+    /// trigger to end-of-batch.
+    ///
+    /// Never blocks. A trigger is only dropped when another is already
+    /// queued, which is equivalent: the queued token guarantees a pass
+    /// that starts after this call, and since callers mutate state before
+    /// triggering, that pass observes the mutation.
+    ///
+    /// Correctness relies on the draw loop draining exactly one token per
+    /// iteration *before* drawing. Do not change the loop to recv after
+    /// the draw or to drain multiple tokens per pass: a full channel means
+    /// a pass is guaranteed, and that guarantee is what makes dropped
+    /// triggers safe. Blocking here would also self-deadlock, since draws
+    /// can trigger further passes.
+    pub fn trigger(&self) {
+        let _ = self.0.try_send(());
+    }
+
+    /// Open a property-update batch bound to this trigger. Property
+    /// notifications are deferred until the batch — including any batches
+    /// spawned from it by property-change reactions holding the batch
+    /// guard — completes, and then exactly one redraw trigger is enqueued.
+    /// Use this instead of manual `trigger()` calls around property
+    /// mutations so a pass can never observe the intermediate state of a
+    /// multi-step update.
+    pub fn make_guard(&self, debug_str: Option<&'static str>) -> PropertyAtomicGuard {
+        let redraw = self.0.clone();
+        PropertyAtomicGuard::new(Box::new(move |_| {
+            if let Some(tag) = debug_str {
+                t!("Redraw batch ({tag}) ended, triggering redraw");
+            }
+            let _ = redraw.try_send(());
+        }))
+    }
+}
 
 #[async_trait]
 pub trait UIObject: Sync {
@@ -110,20 +193,24 @@ pub trait UIObject: Sync {
     async fn handle_mouse_wheel(&self, _wheel_pos: Point) -> bool {
         false
     }
-    async fn handle_touch(&self, _phase: TouchPhase, _id: u64, _touch_pos: Point) -> bool {
-        false
+    /// The gestures this widget accepts. Non-participating widgets
+    /// return [`GestureSet::NONE`] and are inert.
+    fn gesture_set(&self) -> GestureSet {
+        GestureSet::NONE
     }
-    async fn handle_gesture(&self, _gesture: GestureAction) -> bool {
+
+    /// Whether this widget is a gesture target at `pos` (given in the
+    /// widget's parent coordinate space, like `handle_gesture`).
+    fn gesture_hit_test(&self, _pos: Point) -> bool {
         false
     }
 
-    fn handle_touch_sync(
-        &self,
-        _renderer: &RendererSync,
-        _phase: TouchPhase,
-        _id: u64,
-        _touch_pos: Point,
-    ) -> bool {
+    /// Containers: descend the gesture chain under `pos` (the
+    /// container's parent space), translating coordinates. The default
+    /// is a no-op for leaf widgets.
+    fn gesture_descend(&self, _pos: Point, _offset: Point, _chain: &mut Vec<GestureTarget>) {}
+
+    async fn handle_gesture(&self, _gesture: GestureAction) -> bool {
         false
     }
 
@@ -155,6 +242,32 @@ impl<T: Send + Sync + 'static> OnModify<T> {
     ) where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        self.when_change_impl(prop, false, f)
+    }
+
+    /// Like `when_change`, but also skips `Role::Internal` modifications of
+    /// dependencies. Draw-pass-migrated widgets want this: internal sets are
+    /// eval echoes (typically produced by the draw pass itself), so reacting
+    /// to them would queue a pass for every pass, forever. External mutation
+    /// sites (handlers, resize/insets tasks) trigger passes explicitly.
+    pub fn when_change_external<F>(
+        &mut self,
+        prop: PropertyPtr,
+        f: impl Fn(Arc<T>, BatchGuardPtr) -> F + Send + 'static,
+    ) where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.when_change_impl(prop, true, f)
+    }
+
+    fn when_change_impl<F>(
+        &mut self,
+        prop: PropertyPtr,
+        skip_internal: bool,
+        f: impl Fn(Arc<T>, BatchGuardPtr) -> F + Send + 'static,
+    ) where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         let mut on_modify_subs = vec![(Arc::downgrade(&prop), None, prop.subscribe_modify())];
         for dep in prop.get_depends() {
             let Some(dep_prop) = dep.prop.upgrade() else { continue };
@@ -178,8 +291,12 @@ impl<T: Send + Sync + 'static> OnModify<T> {
                     return
                 };
 
-                // Skip internal messages from ourselves or explicitly marked ignored
-                if (idx == 0 && role == Role::Internal) || role == Role::Ignored {
+                // Skip internal messages from ourselves or explicitly marked ignored.
+                // Draw-pass widgets also skip internal dependency echoes.
+                if (idx == 0 && role == Role::Internal) ||
+                    (skip_internal && role == Role::Internal) ||
+                    role == Role::Ignored
+                {
                     continue
                 }
                 if let Some(prop_i) = prop_i {
@@ -195,14 +312,27 @@ impl<T: Send + Sync + 'static> OnModify<T> {
                 } else {
                     t!(
                         "Property {:?} modified -> triggering {:?} [depend_idx={idx}, role={role:?}]",
-                        prop_weak.upgrade().unwrap(),
+                        prop_weak.upgrade(),
                         prop
                     );
                 }
 
                 let Some(self_) = me.upgrade() else {
-                    // Should not happen
-                    panic!("{:?} self destroyed before modify_task was stopped!", prop);
+                    // Normally unreachable: an owner is dropped only after
+                    // stop() cleared its modify tasks, so an alive task
+                    // implies an alive owner. Runtime node removal
+                    // (netdebug rmnode) breaks that: stop() merely drops
+                    // the Task handles, and a future that is mid-poll on
+                    // a worker thread keeps running until its next yield,
+                    // which can carry it past this upgrade after the last
+                    // Arc is gone (this future holds only weak refs).
+                    // With no owner there is nothing left to notify, so
+                    // exit quietly instead of panicking.
+                    warn!(
+                        target: "scene::on_modify",
+                        "Property {:?} owner destroyed before modify_task was stopped", prop
+                    );
+                    return
                 };
 
                 //debug!(target: "app", "property modified");
@@ -219,16 +349,19 @@ pub fn get_ui_object_ptr(node: &SceneNode3) -> Arc<dyn UIObject + Send> {
         Pimpl::ScrollLayer(obj) => obj.clone(),
         Pimpl::VectorArt(obj) => obj.clone(),
         Pimpl::Text(obj) => obj.clone(),
+        Pimpl::TextScramble(obj) => obj.clone(),
         Pimpl::Edit(obj) => obj.clone(),
-        Pimpl::ChatView(obj) => obj.clone(),
         Pimpl::Image(obj) => obj.clone(),
         Pimpl::Video(obj) => obj.clone(),
         Pimpl::Button(obj) => obj.clone(),
         Pimpl::EmojiPicker(obj) => obj.clone(),
         Pimpl::Shortcut(obj) => obj.clone(),
-        Pimpl::Gesture(obj) => obj.clone(),
         Pimpl::Menu(obj) => obj.clone(),
         Pimpl::TokenTable(obj) => obj.clone(),
+        Pimpl::ChatView(obj) => obj.clone(),
+        Pimpl::PrivMsgNode(obj) => obj.clone(),
+        Pimpl::DateMsgNode(obj) => obj.clone(),
+        Pimpl::FileMsgNode(obj) => obj.clone(),
         _ => panic!("unhandled type for get_ui_object: {node:?}"),
     }
 }
@@ -238,16 +371,19 @@ pub fn get_ui_object3<'a>(node: &'a SceneNode3) -> &'a dyn UIObject {
         Pimpl::ScrollLayer(obj) => obj.as_ref(),
         Pimpl::VectorArt(obj) => obj.as_ref(),
         Pimpl::Text(obj) => obj.as_ref(),
+        Pimpl::TextScramble(obj) => obj.as_ref(),
         Pimpl::Edit(obj) => obj.as_ref(),
-        Pimpl::ChatView(obj) => obj.as_ref(),
         Pimpl::Image(obj) => obj.as_ref(),
         Pimpl::Video(obj) => obj.as_ref(),
         Pimpl::Button(obj) => obj.as_ref(),
         Pimpl::EmojiPicker(obj) => obj.as_ref(),
         Pimpl::Shortcut(obj) => obj.as_ref(),
-        Pimpl::Gesture(obj) => obj.as_ref(),
         Pimpl::Menu(obj) => obj.as_ref(),
         Pimpl::TokenTable(obj) => obj.as_ref(),
+        Pimpl::ChatView(obj) => obj.as_ref(),
+        Pimpl::PrivMsgNode(obj) => obj.as_ref(),
+        Pimpl::DateMsgNode(obj) => obj.as_ref(),
+        Pimpl::FileMsgNode(obj) => obj.as_ref(),
         _ => panic!("unhandled type for get_ui_object: {node:?}"),
     }
 }

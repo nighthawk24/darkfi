@@ -393,12 +393,12 @@ async fn retrieve_headers(
             // Store the headers
             validator.blockchain.headers.insert_sync(&response_headers)?;
             last_tip_height = response_headers[0].height;
-            info!(target: "darkfid::task::sync::retrieve_headers", "Headers received: {}/{total}", validator.blockchain.headers.len_sync());
+            info!(target: "darkfid::task::sync::retrieve_headers", "Headers received: {}/{total}", validator.blockchain.headers.len_sync()?);
         }
     }
 
     // Check if we retrieved any new headers
-    if validator.blockchain.headers.is_empty_sync() {
+    if validator.blockchain.headers.is_empty_sync()? {
         return Ok(());
     }
 
@@ -409,7 +409,7 @@ async fn retrieve_headers(
     // in memory.
     info!(target: "darkfid::task::sync::retrieve_headers", "Verifying headers sequence...");
     let mut verified_headers = 0;
-    let total = validator.blockchain.headers.len_sync();
+    let total = validator.blockchain.headers.len_sync()?;
     // First we verify the first `BATCH` sequence, using the last known header
     // as the first sync header previous.
     let mut headers = validator.blockchain.headers.get_after_sync(0, BATCH)?;
@@ -486,7 +486,7 @@ async fn retrieve_blocks(
 
     let mut received_blocks = 0;
     let mut validator = node.validator.write().await;
-    let total = validator.blockchain.headers.len_sync();
+    let total = validator.blockchain.headers.len_sync()?;
     'blocks_loop: loop {
         // Check if all our peers are failing
         let mut count = 0;
@@ -562,6 +562,10 @@ async fn retrieve_blocks(
                         .await
                     {
                         Ok(()) | Err(Error::ProposalAlreadyExists) => continue,
+                        Err(Error::PoWInvalidTimestamp) => {
+                            debug!(target: "darkfid::task::sync::retrieve_blocks", "Block {} timestamp is invalid, likely caused by a stale timestamp bound", block.hash());
+                            break 'blocks_loop
+                        }
                         Err(e) => {
                             debug!(target: "darkfid::task::sync::retrieve_blocks", "Error while appending proposal: {e}");
                             continue 'peers_loop

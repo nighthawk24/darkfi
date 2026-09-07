@@ -20,16 +20,15 @@ use parking_lot::Mutex as SyncMutex;
 use rand::{rngs::OsRng, Rng};
 
 use crate::{
-    gfx::{gfxtag, DrawCall, DrawInstruction, Point, Rectangle, RenderApi, Renderer},
+    gfx::{gfxtag, DrawInstruction, Point, Rectangle, Renderer},
     mesh::{Color, MeshBuilder},
-    prop::BatchGuardId,
     text,
 };
 
 macro_rules! d { ($($arg:tt)*) => { debug!(target: "ui::edit::action", $($arg)*); } }
 
 struct MenuItem {
-    layout: parley::Layout<Color>,
+    layout: text::TextLayout,
     action_id: u32,
     rect: Rectangle,
 }
@@ -115,6 +114,12 @@ impl ActionMode {
         *self.menu.lock() = Some(menu);
     }
 
+    /// Dismiss the overlay. Call whenever the text/selection it refers to
+    /// is invalidated (text edit, cursor tap) so a stale menu can't linger.
+    pub fn clear(&self) {
+        *self.menu.lock() = None;
+    }
+
     /// Returns `Some(n)` if item n is selected.
     pub fn interact(&self, pos: Point) -> Option<u32> {
         let menu = std::mem::take(&mut *self.menu.lock())?;
@@ -131,6 +136,17 @@ impl ActionMode {
 
         d!("Nothing clicked");
         None
+    }
+
+    /// Non-consuming hit test: whether `pos` (widget-local) lands on a
+    /// menu item. Used for gesture hit-testing so the menu overlay can
+    /// be grabbed without consuming it.
+    pub fn hit(&self, pos: Point) -> bool {
+        let menu = self.menu.lock();
+        let Some(menu) = &*menu else { return false };
+
+        let local_pos = pos - menu.pos;
+        menu.items.iter().any(|item| item.rect.contains(local_pos))
     }
 
     /// Called by the parent layout
@@ -169,12 +185,5 @@ impl ActionMode {
         }
 
         vec![DrawInstruction::Overlay(instrs)]
-    }
-
-    /// When theres a state change, call this to update the draw cmds.
-    pub fn redraw(&self, batch_id: BatchGuardId) {
-        let dcs =
-            vec![(self.dc_key, DrawCall::new(self.get_instrs(), vec![], 1, "chatedit_action"))];
-        self.renderer.replace_draw_calls(Some(batch_id), dcs);
     }
 }

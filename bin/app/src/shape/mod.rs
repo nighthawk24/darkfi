@@ -41,6 +41,14 @@ pub use version_block::create_version_block;
 mod copy;
 pub use copy::create_copy;
 
+mod contacts_icon;
+pub use contacts_icon::create_contacts_icon;
+mod channels_icon;
+pub use channels_icon::create_channels_icon;
+
+mod menu_icon;
+pub use menu_icon::create_menu_icon;
+
 mod blockchain_netlogo1;
 pub use blockchain_netlogo1::create_blockchain_netlogo1;
 mod blockchain_netlogo2;
@@ -49,6 +57,14 @@ mod blockchain_netlogo3;
 pub use blockchain_netlogo3::create_blockchain_netlogo3;
 mod blockchain_netlogo4;
 pub use blockchain_netlogo4::create_blockchain_netlogo4;
+
+mod x;
+pub use x::create_x;
+
+mod down_bgtab;
+pub use down_bgtab::create_down_bgtab;
+mod down_arrow;
+pub use down_arrow::create_down_arrow;
 
 //mod settings;
 //pub use settings::{create_right_border, create_settings};

@@ -54,7 +54,7 @@ impl Div<f32> for Dimension {
     }
 }
 
-#[derive(Clone, Copy, Default, SerialEncodable, SerialDecodable)]
+#[derive(Clone, Copy, Default, PartialEq, SerialEncodable, SerialDecodable)]
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -165,12 +165,50 @@ impl Div<f32> for Point {
     }
 }
 
-#[derive(Clone, Copy, SerialEncodable, SerialDecodable)]
+#[derive(Clone, Copy, PartialEq, SerialEncodable, SerialDecodable)]
 pub struct Rectangle {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+/// Accumulates the union of many rectangles. Starts empty; `get()` returns
+/// `None` until something has been added.
+#[derive(Clone, Copy)]
+pub struct RectangleUnion {
+    bounds: Option<Rectangle>,
+}
+
+impl RectangleUnion {
+    pub fn new() -> Self {
+        Self { bounds: None }
+    }
+
+    pub fn add(&mut self, rect: Rectangle) {
+        self.bounds = Some(match self.bounds {
+            Some(bounds) => bounds.union(&rect),
+            None => rect,
+        });
+    }
+
+    /// Fold another union into this one
+    pub fn join(&mut self, other: Self) {
+        if let Some(rect) = other.bounds {
+            self.add(rect);
+        }
+    }
+
+    /// The union of everything added so far, or `None` if empty
+    pub fn get(&self) -> Option<Rectangle> {
+        self.bounds
+    }
+}
+
+impl Default for RectangleUnion {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Rectangle {
@@ -213,6 +251,15 @@ impl Rectangle {
             clipped.h = self.y + self.h - clipped.y;
         }
         Some(clipped)
+    }
+
+    /// Smallest rectangle covering both `self` and `other`
+    pub fn union(&self, other: &Self) -> Self {
+        let x1 = self.x.min(other.x);
+        let y1 = self.y.min(other.y);
+        let x2 = (self.x + self.w).max(other.x + other.w);
+        let y2 = (self.y + self.h).max(other.y + other.h);
+        Self::new(x1, y1, x2 - x1, y2 - y1)
     }
 
     pub fn with_zero_pos(&self) -> Self {
@@ -348,7 +395,7 @@ pub struct Segment {
     pub end: Point,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vector {
     pub x: f32,
     pub y: f32,

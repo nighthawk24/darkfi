@@ -13,10 +13,11 @@ ZKAS = ../../zkas
 PROOFS_SRC = $(shell find ../../src/event_graph -type f -name '*.zk')
 PROOFS_BIN = $(PROOFS_SRC:=.bin)
 
-#ADB_DEVICE = -s DEVICE_ID
-ADB_DEVICE =
+ADB_DEVICE_INST =
+ADB_DEVICE_LOG  =
 
 SRC = \
+	app.sql \
 	build.rs \
 	Cargo.lock \
 	Cargo.toml \
@@ -24,101 +25,101 @@ SRC = \
 	$(shell find assets -type f) \
 	$(shell find src -type f)
 
-RELEASE_FEATURES = --features=enable-plugins
-DEBUG_FEATURES = --features=enable-filelog,enable-plugins
+RELEASE_FEATURES = --features=schema-app,enable-filelog,enable-plugin-darkirc,enable-plugin-drk
+DEBUG_FEATURES = --features=schema-app,enable-filelog,enable-plugin-darkirc,enable-plugin-drk
 
 #DEV_FEATURES = --features=enable-filelog,enable-netdebug,emulate-android
 #DEV_FEATURES = --features=enable-filelog,enable-netdebug,enable-plugins
-DEV_FEATURES = --features=schema-app,enable-netdebug,enable-plugin-darkirc
+DEV_FEATURES = --features=schema-app,enable-filelog,enable-netdebug,enable-plugin-darkirc
 
 default: build-release
 	./darkfi-app
 
-android: android-release
-
 # Platform release builds
 
-macos-release: build-release
-	-mv darkfi-app darkfi-app.macos
-macos-debug: build-debug
-	-mv darkfi-app darkfi-app_debug.macos
-linux-release: build-release
+macos: $(SRC) $(PROOFS_BIN) fonts assets/forest_1920x1080.ivf
+	$(CARGO) zigbuild --no-default-features --release --target universal2-apple-darwin $(RELEASE_FEATURES)
+	-mv target/universal2-apple-darwin/release/darkfi-app darkfi-app.macos
+linux: build-release
 	-mv darkfi-app darkfi-app.linux
-linux-debug: build-debug
-	-mv darkfi-app darkfi-app_debug.linux
-win-release: $(SRC) fonts
-	$(CARGO) build --release $(RELEASE_FEATURES)
-	-mv target/release/darkfi-app.exe .
-win-debug: $(SRC) fonts
-	$(CARGO) build $(DEBUG_FEATURES)
-	-mv target/debug/darkfi-app.exe .
-android-release: $(SRC) fonts assets/forest_720x1280.mp4
-	podman run -v $(shell pwd)/../../:/root/darkfi -w /root/darkfi/bin/app/ -t apk cargo quad-apk build --release $(RELEASE_FEATURES)
+win64-msvc: $(SRC) $(PROOFS_BIN) fonts assets/forest_1920x1080.ivf
+	PATH="$(shell pwd)/release/win:$$PATH" $(CARGO) xwin build --no-default-features --release --target x86_64-pc-windows-msvc $(RELEASE_FEATURES)
+	-mv target/x86_64-pc-windows-msvc/release/darkfi-app.exe .
+android: $(SRC) $(PROOFS_BIN) fonts assets/forest_720x1280.mp4
+	podman run -v $(shell pwd)/../../:/root/darkfi -w /root/darkfi/bin/app/ -t apk cargo quad-apk build --no-default-features --release $(RELEASE_FEATURES)
 	-mv $(RELEASE_APK) darkfi-app.apk
-android-debug: $(SRC) fonts assets/forest_720x1280.mp4
-	podman run -v $(shell pwd)/../../:/root/darkfi -w /root/darkfi/bin/app/ -t apk cargo quad-apk build $(DEBUG_FEATURES)
-	-mv $(DEBUG_APK) darkfi-app_debug.apk
 
-# Windows cross-compilation using Docker/Podman
-win-docker-release: $(SRC)
-	podman run -v $(shell pwd):/root/build -w /root/build/ -t windows \
-		cargo build --release --target x86_64-pc-windows-gnu $(RELEASE_FEATURES)
-	./release/win/package.sh release
-win-docker-debug: $(SRC)
-	podman run -v $(shell pwd):/root/build -w /root/build/ -t windows \
-		cargo build --target x86_64-pc-windows-gnu $(DEBUG_FEATURES)
-	./release/win/package.sh debug
-
-build-release: $(SRC) fonts assets/forest_1920x1080.ivf
-	$(CARGO) build --release $(RELEASE_FEATURES)
+build-release: $(SRC) $(PROOFS_BIN) fonts assets/forest_1920x1080.ivf
+	$(CARGO) build --no-default-features --release $(RELEASE_FEATURES)
 	-mv target/release/darkfi-app .
-build-debug: $(SRC) fonts assets/forest_1920x1080.ivf
-	$(CARGO) build $(DEBUG_FEATURES)
-	-mv target/debug/darkfi-app .
 
 # Download font data
 
-fonts: ibm-plex-mono-regular.otf NotoColorEmoji.ttf
+fonts: data/font/ibm-plex-mono-regular.otf data/font/NotoColorEmoji.ttf data/font/darkfi-custom-emoji.ttf
 
-ibm-plex-mono-regular.otf:
-	wget -c https://dark.fi/assets/ibm-plex-mono-regular.otf
+data/font/ibm-plex-mono-regular.otf:
+	mkdir -p data/font/
+	wget -P data/font/ -c https://dark.fi/assets/ibm-plex-mono-regular.otf
 
-NotoColorEmoji.ttf:
-	wget -c https://dark.fi/assets/NotoColorEmoji.ttf
+data/font/NotoColorEmoji.ttf:
+	mkdir -p data/font/
+	wget -P data/font/ -c https://dark.fi/assets/NotoColorEmoji.ttf
+
+data/font/darkfi-custom-emoji.ttf:
+	mkdir -p data/font/
+	wget -P data/font/ -c https://dark.fi/assets/darkfi-custom-emoji.ttf
 
 # App data
 
-assets/forest_1920x1080.ivf:
+data/forest_1920x1080.ivf:
+	wget -P data/ -c https://dark.fi/assets/forest_1920x1080.ivf
+assets/forest_1920x1080.ivf: data/forest_1920x1080.ivf
 	rm -f assets/forest_720x1280.mp4
-	wget -P assets/ -c https://dark.fi/assets/forest_1920x1080.ivf
+	cp data/forest_1920x1080.ivf assets/
 
-assets/forest_720x1280.mp4:
+data/forest_720x1280.mp4:
+	wget -P data/ -c https://dark.fi/assets/forest_720x1280.mp4
+assets/forest_720x1280.mp4: data/forest_720x1280.mp4
 	rm -f assets/forest_1920x1080.ivf
-	wget -P assets/ -c https://dark.fi/assets/forest_720x1280.mp4
+	cp data/forest_720x1280.mp4 assets/
+
+# zkas circuits (needed for darkirc plugin crate)
+
+zkas:
+	$(MAKE) -C ../../bin/zkas
+
+$(PROOFS_BIN): zkas $(PROOFS_SRC)
+	$(ZKAS) $(basename $@) -o $@
 
 # Developer targets
 
-dev: $(SRC) fonts assets/forest_1920x1080.ivf
-	$(CARGO) lbuild --no-default-features $(DEV_FEATURES)
-	-mv target/debug/darkfi-app .
-	./darkfi-app
+compile-dev: $(SRC) $(PROOFS_BIN) fonts assets/forest_1920x1080.ivf
+	$(CARGO) lbuild --release --no-default-features $(DEV_FEATURES)
+	-mv target/release/darkfi-app .
+
+dev:
+	$(MAKE) compile-dev
+	./darkfi-app 2>&1 | tee app.log
 
 # Users should use the android-release and android-debug targets instead.
-apk: $(SRC) fonts assets/forest_720x1280.mp4
-	cargo quad-apk build --no-default-features $(DEV_FEATURES)
+apk:
+	$(MAKE) compile-apk
 	$(MAKE) install-apk
+	$(MAKE) log-apk
+
+compile-apk: $(SRC) $(PROOFS_BIN) fonts assets/forest_720x1280.mp4
+	cargo quad-apk build --no-default-features --release $(DEV_FEATURES)
+	-mv $(RELEASE_APK) .
 
 install-apk:
-	-mv $(DEBUG_APK) .
-	-adb $(ADB_DEVICE) uninstall darkfi.darkfi_app
-	adb $(ADB_DEVICE) install -r darkfi-app.apk
-	$(MAKE) log-apk
+	-adb $(ADB_DEVICE_INST) uninstall darkfi.darkfi_app
+	adb $(ADB_DEVICE_INST) install -r darkfi-app.apk
 
 log-apk:
 	reset
-	adb $(ADB_DEVICE) logcat -c
-	adb $(ADB_DEVICE) shell monkey -p darkfi.darkfi_app -c android.intent.category.LAUNCHER 1
-	adb $(ADB_DEVICE) logcat -v color -s darkfi -s SAPP -s libc -s DEBUG -s ActivityManager -s ActivityTaskManager -s WindowManager -s AndroidRuntime -s rkfi.darkfi_app | tee output.log
+	adb $(ADB_DEVICE_LOG) logcat -c
+	adb $(ADB_DEVICE_LOG) shell monkey -p darkfi.darkfi_app -c android.intent.category.LAUNCHER 1
+	adb $(ADB_DEVICE_LOG) logcat -v color -s darkfi -s SAPP -s libc -s DEBUG -s ActivityManager -s ActivityTaskManager -s WindowManager -s AndroidRuntime -s rkfi.darkfi_app | tee output.log
 
 # Useful for dev
 podman-cli:
@@ -131,4 +132,4 @@ clean:
 	podman run -v $(shell pwd):/root/dw -w /root/dw -t apk rm -fr target/
 	rm -f darkfi-app.apk
 
-.PHONY: all android cli clean
+.PHONY: all android cli clean zkas

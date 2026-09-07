@@ -24,7 +24,7 @@ pub mod textinput;
 pub(self) mod util;
 pub mod vid;
 
-use util::get_jni_env;
+pub use util::get_jni_env;
 
 macro_rules! call_mainactivity_int_method {
     ($method:expr, $sig:expr $(, $args:expr)*) => {{
@@ -45,14 +45,6 @@ macro_rules! call_mainactivity_str_method {
                 "()Ljava/lang/String;"
             );
             ndk_utils::get_utf_str!(env, text)
-        }
-    }};
-}
-macro_rules! call_mainactivity_float_method {
-    ($method:expr) => {{
-        unsafe {
-            let env = get_jni_env();
-            ndk_utils::call_method!(CallFloatMethod, env, android::ACTIVITY, $method, "()F")
         }
     }};
 }
@@ -77,10 +69,40 @@ pub fn get_keyboard_height() -> usize {
     call_mainactivity_int_method!("getKeyboardHeight", "()I") as usize
 }
 
-pub fn get_screen_density() -> f32 {
-    call_mainactivity_float_method!("getScreenDensity")
+pub fn get_long_press_timeout() -> u32 {
+    call_mainactivity_int_method!("getLongPressTimeout", "()I") as u32
 }
 
 pub fn is_ime_visible() -> bool {
     call_mainactivity_bool_method!("isImeVisible")
+}
+
+/// Ask Android to redispatch the current window insets to ResizingLayout,
+/// which triggers the onApplyInsets callback with fresh values.
+pub fn request_apply_insets() {
+    unsafe {
+        let env = get_jni_env();
+        ndk_utils::call_void_method!(env, android::ACTIVITY, "requestApplyInsets", "()V");
+    }
+}
+
+/// Open `url` in the platform's default handler (e.g. the browser) by calling the
+/// `openUrl` method on MainActivity, which fires an `ACTION_VIEW` intent. Android
+/// only. The URL string is converted to a Java `String` via `NewStringUTF` and the
+/// local reference is released after the call.
+pub fn open_url(url: &str) {
+    unsafe {
+        let env = get_jni_env();
+        let curl = std::ffi::CString::new(url).unwrap();
+        let jurl = (**env).NewStringUTF.unwrap()(env, curl.as_ptr());
+        ndk_utils::call_void_method!(
+            env,
+            android::ACTIVITY,
+            "openUrl",
+            "(Ljava/lang/String;)V",
+            jurl
+        );
+        let delete_local_ref = (**env).DeleteLocalRef.unwrap();
+        delete_local_ref(env, jurl);
+    }
 }

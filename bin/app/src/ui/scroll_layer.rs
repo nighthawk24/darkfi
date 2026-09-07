@@ -17,18 +17,18 @@
  */
 
 use async_trait::async_trait;
-use miniquad::{KeyCode, KeyMods, MouseButton, TouchPhase};
+use miniquad::{KeyCode, KeyMods, MouseButton};
 use std::sync::Arc;
 
 use crate::{
-    gfx::{DrawCall, Point, Rectangle, RendererSync},
-    prop::{BatchGuardPtr, PropertyAtomicGuard},
+    gfx::{Point, Rectangle},
+    prop::PropertyAtomicGuard,
     scene::{Pimpl, SceneNodeWeak},
     util::i18n::I18nBabelFish,
     ExecutorPtr,
 };
 
-use super::{DrawUpdate, Layer, LayerPtr, UIObject};
+use super::{DrawUpdate, GestureTarget, Layer, LayerPtr, RedrawTrigger, UIObject};
 
 pub type ScrollLayerPtr = Arc<ScrollLayer>;
 
@@ -37,8 +37,12 @@ pub struct ScrollLayer {
 }
 
 impl ScrollLayer {
-    pub async fn new(node: SceneNodeWeak, renderer: crate::gfx::Renderer) -> Pimpl {
-        let layer = Layer::new(node.clone(), renderer).await;
+    pub async fn new(
+        node: SceneNodeWeak,
+        renderer: crate::gfx::Renderer,
+        redraw: RedrawTrigger,
+    ) -> Pimpl {
+        let layer = Layer::new(node.clone(), renderer, redraw).await;
         let inner = match layer {
             Pimpl::Layer(l) => l,
             _ => unreachable!(),
@@ -102,18 +106,16 @@ impl UIObject for ScrollLayer {
         self.inner.handle_mouse_wheel(wheel_pos).await
     }
 
-    async fn handle_touch(&self, phase: TouchPhase, id: u64, touch_pos: Point) -> bool {
-        self.inner.handle_touch(phase, id, touch_pos).await
+    fn gesture_hit_test(&self, pos: Point) -> bool {
+        self.inner.gesture_hit_test(pos)
     }
 
-    fn handle_touch_sync(
-        &self,
-        renderer: &RendererSync,
-        phase: TouchPhase,
-        id: u64,
-        touch_pos: Point,
-    ) -> bool {
-        self.inner.handle_touch_sync(renderer, phase, id, touch_pos)
+    fn gesture_descend(&self, pos: Point, offset: Point, chain: &mut Vec<GestureTarget>) {
+        self.inner.gesture_descend(pos, offset, chain)
+    }
+
+    async fn handle_gesture(&self, gesture: crate::ui::gesture::GestureAction) -> bool {
+        self.inner.handle_gesture(gesture).await
     }
 
     fn set_i18n(&self, i18n_fish: &I18nBabelFish) {

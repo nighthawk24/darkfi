@@ -27,14 +27,14 @@ use crate::{
         schema::COLOR_SCHEME,
         App,
     },
-    clipboard, expr,
+    expr,
     gfx::gfxtag,
     mesh::COLOR_CYAN,
     prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, Role},
     scene::{Pimpl, SceneNodePtr, Slot},
     shape,
     ui::{BaseEdit, BaseEditType, Button, Layer, Text, VectorArt, VectorShape},
-    util::i18n::I18nBabelFish,
+    util::{clipboard, i18n::I18nBabelFish},
 };
 
 use super::{super::ColorScheme, data::*, util::*};
@@ -72,7 +72,6 @@ pub async fn make(
     i18n_fish: &I18nBabelFish,
     window_scale: PropertyFloat32,
     send_tx_data: Arc<std::sync::Mutex<SendTxData>>,
-    step1_is_visible: PropertyBool,
 ) -> SceneNodePtr {
     let atom = &mut PropertyAtomicGuard::none();
 
@@ -100,7 +99,9 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     send_step2_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     send_step2_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let send_step2_layer = send_step2_layer.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let send_step2_layer = send_step2_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     wallet_layer.link(send_step2_layer.clone());
     let step2_is_visible =
         PropertyBool::wrap(&send_step2_layer, Role::App, "is_visible", 0).unwrap();
@@ -108,44 +109,7 @@ pub async fn make(
     create_bg_mesh(app, atom, &send_step2_layer, "send_bg2").await;
     create_header_bg(app, atom, &send_step2_layer, "send_header_bg2").await;
 
-    // Back button
-    let node = create_vector_art("send_back_btn_bg2");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, BACKARROW_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, BACKARROW_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let shape = shape::create_back_arrow().scaled(BACKARROW_SCALE);
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
-    send_step2_layer.link(node);
-
     let mut y = 0.;
-
-    let node = create_button("send_back_btn2");
-    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, y).unwrap();
-    prop.set_f32(atom, Role::App, 2, WALLET_BTN_SIZE * 2.).unwrap();
-    prop.set_f32(atom, Role::App, 3, HEADER_HEIGHT).unwrap();
-
-    let step1_is_visible2 = step1_is_visible.clone();
-    let step2_is_visible1 = step2_is_visible.clone();
-    let renderer = app.renderer.clone();
-    let (slot, recvr) = Slot::new("send_back_clicked2");
-    node.register("click", slot).unwrap();
-    let listen_click = app.ex.spawn(async move {
-        while let Ok(_) = recvr.recv().await {
-            let atom = &mut renderer.make_guard(gfxtag!("send step2 back button"));
-            step2_is_visible1.set(atom, false);
-            step1_is_visible2.set(atom, true);
-        }
-    });
-    app.tasks.lock().unwrap().push(listen_click);
-
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
-    send_step2_layer.link(node);
 
     y += HEADER_HEIGHT;
 
@@ -174,13 +138,29 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step2_layer.link(node);
 
     y += PADDING_Y * 2. + BASE_FONTSIZE + 1.;
 
-    create_separator(&app.renderer, atom, &send_step2_layer, "send_token_separator", &mut y).await;
+    create_separator(
+        &app.renderer,
+        &app.redraw_trigger,
+        atom,
+        &send_step2_layer,
+        "send_token_separator",
+        &mut y,
+    )
+    .await;
 
     // Recipient label
     let node = create_text("send_recipient_label");
@@ -205,7 +185,15 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step2_layer.link(node);
 
@@ -229,7 +217,9 @@ pub async fn make(
         1.,
         [0.2, 0.2745, 0.2784, 1.],
     );
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     send_step2_layer.link(node);
 
     // Recipient input
@@ -309,6 +299,7 @@ pub async fn make(
                 me,
                 window_scale.clone(),
                 app.renderer.clone(),
+                app.redraw_trigger.clone(),
                 BaseEditType::SingleLine,
                 app.ex.clone(),
             )
@@ -326,7 +317,9 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 3, 500.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let shape = shape::create_copy(COLOR_CYAN).scaled(PASTE_SCALE);
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     send_step2_layer.link(node);
 
     let node = create_button("send_paste_btn");
@@ -342,22 +335,19 @@ pub async fn make(
     let (slot, recvr) = Slot::new("send_paste_clicked");
     node.register("click", slot).unwrap();
     let recipient_input2 = recipient_input.clone();
-    let renderer_clone = app.renderer.clone();
+    let redraw_clone = app.redraw_trigger.clone();
     let listen_click = app.ex.spawn(async move {
         while let Ok(_) = recvr.recv().await {
             if let Some(clipboard_text) = clipboard::get() {
-                let text_prop = recipient_input2.get_property("text").unwrap();
-                let atom = &mut renderer_clone.make_guard(gfxtag!("step2 recipient paste"));
-                text_prop.set_str(atom, Role::App, 0, &clipboard_text).unwrap();
-                if let crate::scene::Pimpl::Edit(edit) = recipient_input2.pimpl() {
-                    edit.on_text_prop_changed();
-                }
+                let atom = &mut redraw_clone.make_guard(gfxtag!("step2 recipient paste"));
+                recipient_input2.set_property_str(atom, Role::App, "text", clipboard_text).unwrap();
             }
         }
     });
     app.tasks.lock().unwrap().push(listen_click);
 
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     send_step2_layer.link(node);
 
     // Add recipient button
@@ -377,12 +367,12 @@ pub async fn make(
     let recipient_input2 = recipient_input.clone();
     let recipient_text = recipient_input.get_property("text").unwrap();
     let recipient_text_sub = recipient_text.subscribe_modify();
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let btn_bg_valid_clone = btn_bg_valid.clone();
     let btn_bg_invalid_clone = btn_bg_invalid.clone();
     let listen_recipient_text = app.ex.spawn(async move {
         while let Ok(_) = recipient_text_sub.receive().await {
-            let atom = &mut renderer.make_guard(gfxtag!("wallet recipient input recv"));
+            let atom = &mut redraw.make_guard(gfxtag!("wallet recipient input recv"));
             let label_text_color = add_recipient_label_node.get_property("text_color").unwrap();
             let btn_bg_valid_visible = btn_bg_valid_clone.get_property("is_visible").unwrap();
             let btn_bg_invalid_visible = btn_bg_invalid_clone.get_property("is_visible").unwrap();
@@ -419,7 +409,7 @@ pub async fn make(
     app.tasks.lock().unwrap().push(listen_recipient_text);
 
     let step2_is_visible2 = step2_is_visible.clone();
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let recipient_input2 = recipient_input.clone();
     let send_tx_data3 = send_tx_data.clone();
     let sg_root = app.sg_root.clone();
@@ -433,7 +423,7 @@ pub async fn make(
                 continue;
             };
 
-            let atom = &mut renderer.make_guard(gfxtag!("add recipient button"));
+            let atom = &mut redraw.make_guard(gfxtag!("add recipient button"));
 
             let data = {
                 let mut tx_data = send_tx_data3.lock().unwrap();
@@ -449,10 +439,9 @@ pub async fn make(
 
                 // Update amount token symbol
                 if let Some(token_symbol_node) = sg_root.lookup_node("/window/content/wallet/send_step3_layer/send_amount_wrapper/send_amount_token_symbol") {
-                    token_symbol_node.set_property_str(atom, Role::Internal, "text", token_symbol).unwrap();
-                    if let Pimpl::Edit(edit) = token_symbol_node.pimpl() {
-                        edit.on_text_prop_changed();
-                    }
+                    // Role::App: schema-driven write, so the edit's text
+                    // watcher syncs its internal buffer.
+                    token_symbol_node.set_property_str(atom, Role::App, "text", token_symbol).unwrap();
                 }
             }
             if let Some(recipient_str) = &data.recipient_str {

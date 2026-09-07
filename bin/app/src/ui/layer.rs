@@ -17,22 +17,26 @@
  */
 
 use async_trait::async_trait;
-use miniquad::{KeyCode, KeyMods, MouseButton, TouchPhase};
+use miniquad::{KeyCode, KeyMods, MouseButton};
 use parking_lot::Mutex as SyncMutex;
 use rand::{rngs::OsRng, Rng};
 use std::sync::Arc;
 use tracing::instrument;
 
 use crate::{
-    gfx::{DrawCall, DrawInstruction, Point, Rectangle, RenderApi, Renderer, RendererSync},
-    prop::{BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyRect, PropertyUint32, Role},
+    gfx::{gfxtag, DrawCall, DrawInstruction, Point, Rectangle, Renderer},
+    mesh::MeshBuilder,
+    prop::{
+        PropertyAtomicGuard, PropertyBool, PropertyFloat32, PropertyRect, PropertyUint32, Role,
+    },
     scene::{Pimpl, SceneNodePtr, SceneNodeWeak},
     util::i18n::I18nBabelFish,
     ExecutorPtr,
 };
 
 use super::{
-    get_children_ordered, get_ui_object3, get_ui_object_ptr, DrawUpdate, OnModify, UIObject,
+    gesture, get_children_ordered, get_ui_object3, get_ui_object_ptr, DrawUpdate, GestureTarget,
+    OnModify, RedrawTrigger, UIObject,
 };
 
 macro_rules! t { ($($arg:tt)*) => { trace!(target: "ui:layer", $($arg)*); } }
@@ -42,37 +46,41 @@ pub type LayerPtr = Arc<Layer>;
 pub struct Layer {
     node: SceneNodeWeak,
     renderer: Renderer,
+    redraw: RedrawTrigger,
     tasks: SyncMutex<Vec<smol::Task<()>>>,
     dc_key: u64,
 
     is_visible: PropertyBool,
     rect: PropertyRect,
+    alpha: PropertyFloat32,
     z_index: PropertyUint32,
     priority: PropertyUint32,
-
-    parent_rect: SyncMutex<Option<Rectangle>>,
+    debug: PropertyBool,
 }
 
 impl Layer {
-    pub async fn new(node: SceneNodeWeak, renderer: Renderer) -> Pimpl {
-        let node_ref = &node.upgrade().unwrap();
+    pub async fn new(_node: SceneNodeWeak, renderer: Renderer, redraw: RedrawTrigger) -> Pimpl {
+        let node_ref = &_node.upgrade().unwrap();
         let is_visible = PropertyBool::wrap(node_ref, Role::Internal, "is_visible", 0).unwrap();
         let rect = PropertyRect::wrap(node_ref, Role::Internal, "rect").unwrap();
+        let alpha = PropertyFloat32::wrap(node_ref, Role::Internal, "alpha", 0).unwrap();
         let z_index = PropertyUint32::wrap(node_ref, Role::Internal, "z_index", 0).unwrap();
         let priority = PropertyUint32::wrap(node_ref, Role::Internal, "priority", 0).unwrap();
+        let debug = PropertyBool::wrap(node_ref, Role::Internal, "debug", 0).unwrap();
 
         let self_ = Arc::new(Self {
-            node,
+            node: _node,
             renderer,
+            redraw,
             tasks: SyncMutex::new(vec![]),
             dc_key: OsRng.gen(),
 
             is_visible,
             rect,
+            alpha,
             z_index,
             priority,
-
-            parent_rect: SyncMutex::new(None),
+            debug,
         });
 
         Pimpl::Layer(self_)
@@ -83,21 +91,6 @@ impl Layer {
         get_children_ordered(&node)
     }
 
-    #[instrument(target = "ui::layer")]
-    async fn redraw(self: Arc<Self>, batch: BatchGuardPtr) {
-        let Some(parent_rect) = self.parent_rect.lock().clone() else {
-            warn!(target: "ui:layer", "Skip draw since parent rect is empty");
-            return
-        };
-
-        let atom = &mut batch.spawn();
-        let Some(draw_update) = self.get_draw_calls(parent_rect, atom).await else {
-            error!(target: "ui:layer", "Layer failed to draw");
-            return
-        };
-        self.renderer.replace_draw_calls(Some(batch.id), draw_update.draw_calls);
-    }
-
     async fn get_draw_calls(
         &self,
         parent_rect: Rectangle,
@@ -105,6 +98,8 @@ impl Layer {
     ) -> Option<DrawUpdate> {
         self.rect.eval(atom, &parent_rect).ok()?;
         let rect = self.rect.get();
+
+        let alpha = self.alpha.get();
 
         // Apply viewport
 
@@ -126,12 +121,17 @@ impl Layer {
             }
         }
 
-        let dc = DrawCall::new(
-            vec![DrawInstruction::ApplyView(rect)],
-            child_calls,
-            self.z_index.get(),
-            "layer",
-        );
+        let mut instrs = vec![DrawInstruction::ApplyView(rect)];
+
+        if self.debug.get() {
+            let mut mesh = MeshBuilder::new(gfxtag!("layer_debug"));
+            mesh.draw_outline(&Rectangle::new(0., 0., rect.w, rect.h), [1., 0., 0., 1.], 1.);
+            instrs.push(DrawInstruction::Draw(mesh.alloc(&self.renderer).draw_untextured()));
+        }
+
+        instrs.push(DrawInstruction::SetAlpha(alpha));
+
+        let dc = DrawCall::new(instrs, child_calls, self.z_index.get(), "layer");
         draw_calls.push((self.dc_key, dc));
         Some(DrawUpdate { key: self.dc_key, draw_calls })
     }
@@ -154,9 +154,25 @@ impl UIObject for Layer {
         let me = Arc::downgrade(&self);
 
         let mut on_modify = OnModify::new(ex.clone(), self.node.clone(), me.clone());
-        on_modify.when_change(self.is_visible.prop(), Self::redraw);
-        on_modify.when_change(self.rect.prop(), Self::redraw);
-        on_modify.when_change(self.z_index.prop(), Self::redraw);
+        // Stateless in the pass: property changes only request a draw pass.
+        // All layer output is recomputed by the pass itself. Internal-role
+        // sets are eval echoes of the pass, so only external (App) changes
+        // trigger — otherwise every pass would queue another, forever.
+        on_modify.when_change_external(self.is_visible.prop(), |self_, _| async move {
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.rect.prop(), |self_, _| async move {
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.alpha.prop(), |self_, _| async move {
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.z_index.prop(), |self_, _| async move {
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.debug.prop(), |self_, _| async move {
+            self_.redraw.trigger();
+        });
 
         *self.tasks.lock() = on_modify.tasks;
 
@@ -168,7 +184,6 @@ impl UIObject for Layer {
 
     fn stop(&self) {
         self.tasks.lock().clear();
-        *self.parent_rect.lock() = None;
         for child in self.get_children() {
             let obj = get_ui_object3(&child);
             obj.stop();
@@ -181,19 +196,6 @@ impl UIObject for Layer {
         parent_rect: Rectangle,
         atom: &mut PropertyAtomicGuard,
     ) -> Option<DrawUpdate> {
-        *self.parent_rect.lock() = Some(parent_rect);
-
-        /*
-        if !parent_rect.dim().contains(&offset_rect) {
-            error!(
-                target: "ui::layer",
-                "layer rect {:?} is not inside parent {:?}",
-                offset_rect, parent_rect
-            );
-            return None
-        }
-        */
-
         self.get_draw_calls(parent_rect, atom).await
     }
 
@@ -293,37 +295,51 @@ impl UIObject for Layer {
         }
         false
     }
-    async fn handle_touch(&self, phase: TouchPhase, id: u64, mut touch_pos: Point) -> bool {
+    fn gesture_hit_test(&self, pos: Point) -> bool {
         if !self.is_visible.get() {
             return false
         }
-        touch_pos -= self.rect.get().pos();
+
+        let local = pos - self.rect.get().pos();
         for child in self.get_children() {
             let obj = get_ui_object3(&child);
-            if obj.handle_touch(phase, id, touch_pos).await {
+            if obj.gesture_hit_test(local) {
                 return true
             }
         }
+
         false
     }
 
-    fn handle_touch_sync(
-        &self,
-        renderer: &RendererSync,
-        phase: TouchPhase,
-        id: u64,
-        mut touch_pos: Point,
-    ) -> bool {
+    fn gesture_descend(&self, pos: Point, offset: Point, chain: &mut Vec<GestureTarget>) {
+        if !self.is_visible.get() {
+            return
+        }
+
+        let rect_pos = self.rect.get().pos();
+        let local = pos - rect_pos;
+        let children: Vec<_> =
+            self.get_children().iter().map(|child| get_ui_object_ptr(child)).collect();
+        gesture::scan_children(&children, local, offset + rect_pos, chain);
+    }
+
+    async fn handle_gesture(&self, gesture: gesture::GestureAction) -> bool {
         if !self.is_visible.get() {
             return false
         }
-        touch_pos -= self.rect.get().pos();
+
+        let mut gesture = gesture;
+        let rect_pos = self.rect.get().pos();
+        gesture.translate(crate::gfx::Vector { x: -rect_pos.x, y: -rect_pos.y });
+
         for child in self.get_children() {
             let obj = get_ui_object3(&child);
-            if obj.handle_touch_sync(renderer, phase, id, touch_pos) {
+            if obj.handle_gesture(gesture.clone()).await {
+                t!("handle_gesture swallowed by {child:?}");
                 return true
             }
         }
+
         false
     }
 

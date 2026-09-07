@@ -23,8 +23,9 @@ use darkfi_sdk::crypto::keypair::Address;
 #[cfg(any(target_os = "android", feature = "emulate-android"))]
 mod android_ui_consts {
     pub const BACKARROW_SCALE: f32 = 30.;
-    pub const BACKARROW_X: f32 = 50.;
+    pub const BACKARROW_X: f32 = 70.;
     pub const BACKARROW_Y: f32 = 70.;
+    pub const BACKARROW_BG_W: f32 = 140.;
     pub const TITLE_FONTSIZE: f32 = 56.;
     pub const BUTTON_FONTSIZE: f32 = 48.;
     pub const BASE_FONTSIZE: f32 = 48.;
@@ -43,8 +44,8 @@ mod android_ui_consts {
     pub const RECIPIENT_INPUT_HEIGHT: f32 = 120.;
     pub const RECIPIENT_INPUT_FONTSIZE: f32 = 48.;
     pub const HEADER_HEIGHT: f32 = 140.;
+    pub const BACK_SEP_W: f32 = 1.;
     pub const ROW_HEIGHT: f32 = 80.;
-    pub const WALLET_BTN_SIZE: f32 = 50.;
     pub const COPY_WIDTH: f32 = 200.;
     pub const COPY_SCALE: f32 = 30.;
 
@@ -56,9 +57,10 @@ mod android_ui_consts {
     pub const TOOLTIP_PADDING_Y: f32 = 15.;
 
     pub const NETSTATUS_ICON_SIZE: f32 = 140.;
-    pub const SETTINGS_ICON_SIZE: f32 = 140.;
     pub const NETLOGO_SCALE: f32 = 7.;
-    pub const EMOJI_PICKER_ICON_SIZE: f32 = 120.;
+
+    pub const PROGRESS_FONTSIZE: f32 = 36.;
+    pub const PROGRESS_MARGIN: f32 = 10.;
 }
 
 #[cfg(target_os = "android")]
@@ -78,7 +80,8 @@ mod ui_consts {
 mod ui_consts {
     pub const BACKARROW_SCALE: f32 = 15.;
     pub const BACKARROW_X: f32 = 38.;
-    pub const BACKARROW_Y: f32 = 26.;
+    pub const BACKARROW_Y: f32 = 30.;
+    pub const BACKARROW_BG_W: f32 = 80.;
     pub const TITLE_FONTSIZE: f32 = 20.;
     pub const BUTTON_FONTSIZE: f32 = 20.;
     pub const BASE_FONTSIZE: f32 = 20.;
@@ -97,8 +100,8 @@ mod ui_consts {
     pub const RECIPIENT_INPUT_HEIGHT: f32 = 60.;
     pub const RECIPIENT_INPUT_FONTSIZE: f32 = 20.;
     pub const HEADER_HEIGHT: f32 = 60.;
+    pub const BACK_SEP_W: f32 = 0.5;
     pub const ROW_HEIGHT: f32 = 80.;
-    pub const WALLET_BTN_SIZE: f32 = 50.;
     pub const COPY_WIDTH: f32 = 100.;
     pub const COPY_SCALE: f32 = 15.;
 
@@ -110,9 +113,10 @@ mod ui_consts {
     pub const TOOLTIP_PADDING_Y: f32 = 6.;
 
     pub const NETSTATUS_ICON_SIZE: f32 = 60.;
-    pub const SETTINGS_ICON_SIZE: f32 = 60.;
     pub const NETLOGO_SCALE: f32 = 3.5;
-    pub const EMOJI_PICKER_ICON_SIZE: f32 = 50.;
+
+    pub const PROGRESS_FONTSIZE: f32 = 14.;
+    pub const PROGRESS_MARGIN: f32 = 5.;
 }
 
 pub use ui_consts::*;

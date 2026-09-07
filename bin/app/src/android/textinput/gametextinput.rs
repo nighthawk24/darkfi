@@ -30,6 +30,33 @@ macro_rules! w { ($($arg:tt)*) => { warn!(target: "android::textinput::gametexti
 
 pub const SPAN_UNDEFINED: i32 = -1;
 
+/// Rust byte index -> Java UTF-16 code-unit index.
+/// `byte_idx` must be a valid char boundary of `text`.
+fn byte_to_utf16(text: &str, byte_idx: usize) -> usize {
+    assert!(
+        text.is_char_boundary(byte_idx),
+        "byte_idx {byte_idx} is not a char boundary of {text:?}"
+    );
+    text[..byte_idx].chars().map(|c| c.len_utf16()).sum()
+}
+
+/// Java UTF-16 code-unit index -> Rust byte index.
+/// `utf16_idx` must land exactly on a char boundary (splits a surrogate pair otherwise).
+fn utf16_to_byte(text: &str, utf16_idx: usize) -> usize {
+    let mut count = 0usize;
+    for (byte_idx, ch) in text.char_indices() {
+        if count == utf16_idx {
+            return byte_idx;
+        }
+        count += ch.len_utf16();
+    }
+    assert!(
+        count == utf16_idx,
+        "utf16_idx {utf16_idx} is not at a char boundary (text utf16 len = {count})"
+    );
+    text.len()
+}
+
 /// Global GameTextInput instance for JNI bridge
 ///
 /// Single global instance since only ONE editor is active at a time.
@@ -50,7 +77,7 @@ pub struct GameTextInput {
     state_class: ndk_sys::jclass,
     set_soft_keyboard_active_method: ndk_sys::jmethodID,
     set_input_type_method: ndk_sys::jmethodID,
-    //restart_input_method: ndk_sys::jmethodID,
+    restart_input_method: ndk_sys::jmethodID,
     state_constructor: ndk_sys::jmethodID,
     state_class_info: StateClassInfo,
 }
@@ -97,13 +124,13 @@ impl GameTextInput {
                 set_input_type_sig.as_ptr() as _,
             );
 
-            /*let restart_input_sig = b"()V\0";
+            let restart_input_sig = b"()V\0";
             let restart_input_method = get_method_id(
                 env,
                 input_connection_class,
                 b"restartInput\0".as_ptr() as _,
                 restart_input_sig.as_ptr() as _,
-            );*/
+            );
 
             let state_class = new_global_ref!(env, state_java_class) as ndk_sys::jclass;
 
@@ -163,7 +190,7 @@ impl GameTextInput {
                 state_class,
                 set_soft_keyboard_active_method,
                 set_input_type_method,
-                //restart_input_method,
+                restart_input_method,
                 state_constructor,
                 state_class_info,
             }
@@ -205,11 +232,13 @@ impl GameTextInput {
         }
     }
 
-    pub fn set_select(&self, start: i32, end: i32) -> Result<(), ()> {
+    pub fn set_select(&self, text: &str, start: usize, end: usize) -> Result<(), ()> {
         let Some(input_connection) = *self.input_connection.read() else {
-            w!("push_update() - no input_connection set");
+            w!("set_select() - no input_connection set");
             return Err(())
         };
+        let start = byte_to_utf16(text, start) as i32;
+        let end = byte_to_utf16(text, end) as i32;
         let is_success = unsafe {
             let env = get_jni_env();
             call_bool_method!(env, input_connection, "setSelection", "(II)Z", start, end)
@@ -217,6 +246,7 @@ impl GameTextInput {
         if is_success == 0u8 {
             return Err(())
         }
+        self.restart_input();
         Ok(())
     }
 
@@ -299,7 +329,7 @@ impl GameTextInput {
         }
     }
 
-    /*pub fn restart_input(&self) {
+    pub fn restart_input(&self) {
         let Some(input_connection) = *self.input_connection.read() else {
             w!("restart_input() - no input_connection set");
             return
@@ -309,7 +339,7 @@ impl GameTextInput {
             let call_void_method = (**env).CallVoidMethod.unwrap();
             call_void_method(env, input_connection, self.restart_input_method);
         }
-    }*/
+    }
 
     fn state_to_java(&self, state: &AndroidTextInputState) -> ndk_sys::jobject {
         unsafe {
@@ -321,7 +351,10 @@ impl GameTextInput {
             let new_object = (**env).NewObject.unwrap();
 
             let (compose_start, compose_end) = match state.compose {
-                Some((start, end)) => (start as i32, end as i32),
+                Some((start, end)) => (
+                    byte_to_utf16(&state.text, start) as i32,
+                    byte_to_utf16(&state.text, end) as i32,
+                ),
                 None => (SPAN_UNDEFINED, SPAN_UNDEFINED),
             };
 
@@ -330,8 +363,8 @@ impl GameTextInput {
                 self.state_class,
                 self.state_constructor,
                 jtext,
-                state.select.0 as i32,
-                state.select.1 as i32,
+                byte_to_utf16(&state.text, state.select.0) as i32,
+                byte_to_utf16(&state.text, state.select.1) as i32,
                 compose_start,
                 compose_end,
             );
@@ -363,18 +396,46 @@ impl GameTextInput {
             let delete_local_ref = (**env).DeleteLocalRef.unwrap();
             delete_local_ref(env, jtext);
 
-            let compose = if compose_start >= 0 {
-                Some((compose_start as usize, compose_end as usize))
+            // Android reports -1 (SPAN_UNDEFINED) when there is no selection
+            // or composing region set (see android.text.Selection.getSelectionStart:
+            // "-1 if there is no selection or cursor"). During editor focus
+            // transitions / IME restarts it can also deliver momentarily
+            // inconsistent snapshots (e.g. stale selection indices referencing
+            // a position beyond the current text). Treat any out-of-range
+            // select as undefined -> cursor at end, mirroring the Java-side
+            // convention in InputConnection.processKeyEvent.
+            let utf16_len = text.encode_utf16().count();
+
+            let select = if select_start < 0 ||
+                select_end < 0 ||
+                select_start as usize > utf16_len ||
+                select_end as usize > utf16_len
+            {
+                (text.len(), text.len())
             } else {
-                assert!(compose_end < 0);
+                (
+                    utf16_to_byte(&text, select_start as usize),
+                    utf16_to_byte(&text, select_end as usize),
+                )
+            };
+
+            let compose = if compose_start >= 0 {
+                assert!(
+                    (compose_start as usize) <= utf16_len
+                        && (compose_end as usize) <= utf16_len,
+                    "out-of-range compose ({compose_start}, {compose_end}) for utf16 len {utf16_len}"
+                );
+                Some((
+                    utf16_to_byte(&text, compose_start as usize),
+                    utf16_to_byte(&text, compose_end as usize),
+                ))
+            } else {
+                assert_eq!(compose_start, SPAN_UNDEFINED);
+                assert_eq!(compose_end, SPAN_UNDEFINED);
                 None
             };
 
-            AndroidTextInputState {
-                text,
-                select: (select_start as usize, select_end as usize),
-                compose,
-            }
+            AndroidTextInputState { text, select, compose }
         }
     }
 }

@@ -1,10 +1,16 @@
 //% IMPORTS
 
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowInsets.Type;
 import android.view.inputmethod.EditorInfo;
 import android.text.InputType;
+import android.content.Intent;
+import android.net.Uri;
 import android.util.Log;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.PrintWriter;
 import java.util.HashMap;
 
 import videodecode.VideoDecoder;
@@ -81,7 +87,8 @@ if (true) return main.inpcon;
 
 native static void onApplyInsets(
     int sys_left, int sys_top, int sys_right, int sys_bottom,
-    int ime_left, int ime_top, int ime_right, int ime_bottom
+    int ime_left, int ime_top, int ime_right, int ime_bottom,
+    boolean ime_visible
 );
 
 //% END
@@ -98,7 +105,8 @@ native static void onApplyInsets(
 
     onApplyInsets(
         sysInsets.left, sysInsets.top, sysInsets.right, sysInsets.bottom,
-        imeInsets.left, imeInsets.top, imeInsets.right, imeInsets.bottom
+        imeInsets.left, imeInsets.top, imeInsets.right, imeInsets.bottom,
+        insets.isVisible(WindowInsets.Type.ime())
     );
 }
 // Workaround for Java error due to remaining body.
@@ -134,10 +142,6 @@ public int getKeyboardHeight() {
     return Math.max(0, imeInsets.bottom - navInsets.bottom);
 }
 
-public float getScreenDensity() {
-    return getResources().getDisplayMetrics().density;
-}
-
 public boolean isImeVisible() {
     View decorView = getWindow().getDecorView();
     WindowInsets insets = decorView.getRootWindowInsets();
@@ -147,10 +151,32 @@ public boolean isImeVisible() {
     return insets.isVisible(Type.ime());
 }
 
+public void requestApplyInsets() {
+    runOnUiThread(new Runnable() {
+        @Override
+        public void run() {
+            view.requestApplyInsets();
+        }
+    });
+}
+
 public VideoDecoder createVideoDecoder() {
     VideoDecoder decoder = new VideoDecoder();
     decoder.setContext(this);
     return decoder;
+}
+
+public int getLongPressTimeout() {
+    return ViewConfiguration.getLongPressTimeout();
+}
+
+public void openUrl(String url) {
+    try {
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+        startActivity(intent);
+    } catch (Exception e) {
+        Log.e("darkfi", "Failed to open URL " + url + ": " + e.getMessage());
+    }
 }
 
 //% END
@@ -160,6 +186,24 @@ public VideoDecoder createVideoDecoder() {
 // Start a foreground service so the app stays awake
 Intent serviceIntent = new Intent(this, ForegroundService.class);
 startForegroundService(serviceIntent);
+
+final Thread.UncaughtExceptionHandler defaultHandler = Thread.getDefaultUncaughtExceptionHandler();
+Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+    @Override
+    public void uncaughtException(Thread thread, Throwable throwable) {
+        try {
+            File logFile = new File(getExternalFilesDir(null), "darkfi-app.log");
+            PrintWriter writer = new PrintWriter(new FileWriter(logFile, true));
+            writer.println("Uncaught exception on thread " + thread.getName() + ":");
+            writer.println(Log.getStackTraceString(throwable));
+            writer.close();
+        } catch (Exception ignored) {
+        }
+        if (defaultHandler != null) {
+            defaultHandler.uncaughtException(thread, throwable);
+        }
+    }
+});
 
 //% END
 

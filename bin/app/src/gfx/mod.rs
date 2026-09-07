@@ -24,11 +24,11 @@ use darkfi_serial::{
 use miniquad::native::egl;
 use miniquad::{
     conf, window, Bindings, BufferSource, BufferType, BufferUsage, EventHandler, KeyCode, KeyMods,
-    MouseButton, PassAction, Pipeline, RenderingBackend, TextureFormat, TextureKind, TextureParams,
-    TextureWrap, TouchPhase, UniformType,
+    MouseButton, PassAction, Pipeline, RenderPass, RenderingBackend, TextureFormat, TextureKind,
+    TextureParams, TextureWrap, TouchPhase, UniformType,
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::File,
     io::Write,
     path::PathBuf,
@@ -43,26 +43,27 @@ use anim::{Frame as AnimFrame, GfxSeqAnim};
 mod api;
 pub use api::{
     EpochIndex, GraphicsMethod, ManagedBuffer, ManagedBufferPtr, ManagedSeqAnim, ManagedSeqAnimPtr,
-    ManagedTexture, ManagedTexturePtr, RenderApi, Renderer, RendererSync,
+    ManagedTexture, ManagedTexturePtr, RenderApi, Renderer,
 };
+mod epoch_cache;
+pub use epoch_cache::{EpochCache, EpochTracker};
 mod ev;
 pub use ev::{
     GraphicsEventCharSub, GraphicsEventKeyDownSub, GraphicsEventKeyUpSub,
     GraphicsEventMouseButtonDownSub, GraphicsEventMouseButtonUpSub, GraphicsEventMouseMoveSub,
     GraphicsEventMouseWheelSub, GraphicsEventPublisher, GraphicsEventPublisherPtr,
-    GraphicsEventResizeSub, GraphicsEventTouchSub,
+    GraphicsEventResizeSub,
 };
 mod favico;
 mod prune;
 use prune::PruneMethodHeap;
 mod linalg;
-pub use linalg::{Dimension, Point, Rectangle, Segment, Vector};
+pub use linalg::{Dimension, Point, Rectangle, RectangleUnion, Segment, Vector};
 mod shader;
 
 use crate::{
-    prop::{BatchGuardId, PropertyAtomicGuard},
+    prop::PropertyAtomicGuard,
     scene::{Pimpl, SceneNodePtr},
-    util::unixtime,
     GOD,
 };
 
@@ -227,6 +228,7 @@ impl AsyncEncodable for DrawMesh {
 #[derive(Debug, Clone)]
 pub enum DrawInstruction {
     SetScale(f32),
+    SetAlpha(f32),
     Move(Point),
     SetPos(Point),
     ApplyView(Rectangle),
@@ -246,6 +248,7 @@ impl DrawInstruction {
     ) -> GfxDrawInstruction {
         match self {
             Self::SetScale(scale) => GfxDrawInstruction::SetScale(scale),
+            Self::SetAlpha(alpha) => GfxDrawInstruction::SetAlpha(alpha),
             Self::Move(off) => GfxDrawInstruction::Move(off),
             Self::SetPos(pos) => GfxDrawInstruction::SetPos(pos),
             Self::ApplyView(view) => GfxDrawInstruction::ApplyView(view),
@@ -286,7 +289,6 @@ impl DrawCall {
         self,
         textures: &HashMap<TextureId, miniquad::TextureId>,
         buffers: &HashMap<BufferId, miniquad::BufferId>,
-        timest: Timestamp,
     ) -> GfxDrawCall {
         GfxDrawCall {
             instrs: self
@@ -296,7 +298,6 @@ impl DrawCall {
                 .collect(),
             dcs: self.dcs,
             z_index: self.z_index,
-            timest,
         }
     }
 }
@@ -314,6 +315,7 @@ struct GfxDrawMesh {
 #[derive(Debug, Clone)]
 enum GfxDrawInstruction {
     SetScale(f32),
+    SetAlpha(f32),
     Move(Point),
     SetPos(Point),
     ApplyView(Rectangle),
@@ -329,19 +331,19 @@ struct GfxDrawCall {
     instrs: Vec<GfxDrawInstruction>,
     dcs: Vec<DcId>,
     z_index: u32,
-    timest: Timestamp,
 }
 
 struct OverlayDefer {
     scale: f32,
     pos: Point,
+    alpha: f32,
     instrs: Vec<GfxDrawInstruction>,
 }
 
 struct RenderContext<'a> {
     ctx: &'a mut Box<dyn RenderingBackend>,
     draw_calls: &'a HashMap<DcId, GfxDrawCall>,
-    uniforms_data: [u8; 128],
+    uniforms_data: [u8; 132],
     white_texture: miniquad::TextureId,
     loaded_pipelines: &'a [Pipeline; 2],
 
@@ -349,6 +351,7 @@ struct RenderContext<'a> {
     view: Rectangle,
     cursor: Point,
     gfx_pipeline: GraphicPipeline,
+    alpha: f32,
 
     anims: &'a mut HashMap<AnimId, GfxSeqAnim>,
     overlays: Vec<OverlayDefer>,
@@ -373,6 +376,10 @@ impl<'a> RenderContext<'a> {
 
         let overlays = std::mem::take(&mut self.overlays);
         for overlay in overlays {
+            // screen_size() is physical; dividing by the overlay's
+            // scale virtualizes it into the same unit space the defer
+            // origin and Move offsets use (mirrors Window::draw's
+            // screen_size/scale for the root view).
             self.view = Rectangle::new(0., 0., screen_w, screen_h);
             self.scale = overlay.scale;
             self.view.w /= self.scale;
@@ -380,6 +387,7 @@ impl<'a> RenderContext<'a> {
             self.apply_view();
 
             self.cursor = overlay.pos;
+            self.alpha = overlay.alpha;
             self.apply_model();
 
             for instr in overlay.instrs {
@@ -408,6 +416,8 @@ impl<'a> RenderContext<'a> {
                 }
             }
         }
+
+        self.alpha = 1.;
     }
 
     fn apply_view(&mut self) {
@@ -444,7 +454,8 @@ impl<'a> RenderContext<'a> {
             glam::Mat4::from_scale(glam::Vec3::new(scale_w, scale_h, 1.));
 
         let data: [u8; 64] = unsafe { std::mem::transmute_copy(&model) };
-        self.uniforms_data[64..].copy_from_slice(&data);
+        self.uniforms_data[64..128].copy_from_slice(&data);
+        self.uniforms_data[128..132].copy_from_slice(&self.alpha.to_ne_bytes());
         self.ctx.apply_uniforms_from_bytes(self.uniforms_data.as_ptr(), self.uniforms_data.len());
     }
 
@@ -455,6 +466,7 @@ impl<'a> RenderContext<'a> {
         let old_view = self.view;
         let old_cursor = self.cursor;
         let old_pipeline = self.gfx_pipeline;
+        let old_alpha = self.alpha;
 
         for (idx, instr) in draw_call.instrs.iter().enumerate() {
             match instr {
@@ -464,6 +476,17 @@ impl<'a> RenderContext<'a> {
                     self.view.h /= self.scale;
                     if is_debug {
                         d!("{ws}set_scale({scale})");
+                    }
+                }
+                GfxDrawInstruction::SetAlpha(alpha) => {
+                    self.alpha *= alpha;
+                    self.uniforms_data[128..132].copy_from_slice(&self.alpha.to_ne_bytes());
+                    self.ctx.apply_uniforms_from_bytes(
+                        self.uniforms_data.as_ptr(),
+                        self.uniforms_data.len(),
+                    );
+                    if is_debug {
+                        d!("{ws}set_alpha({alpha})  alpha={}", self.alpha);
                     }
                 }
                 GfxDrawInstruction::Move(off) => {
@@ -549,10 +572,16 @@ impl<'a> RenderContext<'a> {
                     }
                 }
                 GfxDrawInstruction::Overlay(instrs) => {
-                    let pos = self.view.pos() / self.scale + self.cursor;
+                    // `self.view` is in virtual units and draw_overlays
+                    // consumes this in virtual units (Move adds virtual
+                    // offsets onto it), so the view origin passes
+                    // through unscaled; dividing by the window scale
+                    // here misplaces overlays on scaled displays.
+                    let pos = self.view.pos() + self.cursor;
                     self.overlays.push(OverlayDefer {
                         scale: self.scale,
                         pos,
+                        alpha: self.alpha,
                         instrs: instrs.clone(),
                     });
                 }
@@ -581,6 +610,7 @@ impl<'a> RenderContext<'a> {
 
         self.cursor = old_cursor;
         self.gfx_pipeline = old_pipeline;
+        self.alpha = old_alpha;
         let pipeline_idx = self.gfx_pipeline as usize;
         assert!(pipeline_idx < self.loaded_pipelines.len());
         self.ctx.apply_pipeline(&self.loaded_pipelines[pipeline_idx]);
@@ -588,8 +618,28 @@ impl<'a> RenderContext<'a> {
     }
 }
 
-type Timestamp = u64;
 type DcId = u64;
+
+/// CRT post-processing parameters as set at app start. They are faded to
+/// zero (brightness to 1.0) over CRT_FADE_SECS and the pass is then dropped.
+#[derive(Clone, Copy, Debug)]
+struct CrtParams {
+    chromatic_aberration: f32,
+    blur_amount: f32,
+    blur_radius: f32,
+    glow_intensity: f32,
+    brightness: f32,
+}
+
+const CRT_START: CrtParams = CrtParams {
+    chromatic_aberration: 0.008,
+    blur_amount: 4.,
+    blur_radius: 8.,
+    glow_intensity: 10.,
+    brightness: 4.08,
+};
+
+const CRT_FADE_SECS: f32 = 1.;
 
 struct Stage {
     ctx: Box<dyn RenderingBackend>,
@@ -598,10 +648,15 @@ struct Stage {
     loaded_pipelines: [Pipeline; 2],
     white_texture: miniquad::TextureId,
     draw_calls: HashMap<DcId, GfxDrawCall>,
-    pending_batches: HashMap<BatchGuardId, Vec<GraphicsMethod>>,
-    /// When dropping batches, we add to this set so that we keep track
-    /// of the internal state's correctness.
-    dropped_batches: Box<HashSet<BatchGuardId>>,
+
+    /// CRT post-processing
+    crt_pipeline: Pipeline,
+    crt_pass: Option<RenderPass>,
+    crt_texture: Option<miniquad::TextureId>,
+    crt_vertex_buffer: Option<miniquad::BufferId>,
+    crt_index_buffer: Option<miniquad::BufferId>,
+    crt_size: (u32, u32),
+    crt_start: Option<std::time::Instant>,
 
     textures: Box<HashMap<TextureId, miniquad::TextureId>>,
     buffers: Box<HashMap<BufferId, miniquad::BufferId>>,
@@ -639,6 +694,7 @@ impl Stage {
 
         let rgb_pipeline = shader::create_rgb_pipeline(&mut ctx);
         let yuv_pipeline = shader::create_yuv_pipeline(&mut ctx);
+        let crt_pipeline = shader::create_crt_pipeline(&mut ctx);
 
         #[cfg(target_os = "android")]
         let libegl = egl::LibEgl::try_load().expect("Cant load LibEGL");
@@ -649,12 +705,17 @@ impl Stage {
             libegl,
             loaded_pipelines: [rgb_pipeline, yuv_pipeline],
             white_texture,
+            crt_pipeline,
+            crt_pass: None,
+            crt_texture: None,
+            crt_vertex_buffer: None,
+            crt_index_buffer: None,
+            crt_size: (0, 0),
+            crt_start: None,
             draw_calls: HashMap::from([(
                 0,
-                GfxDrawCall { instrs: vec![], dcs: vec![], z_index: 0, timest: 0 },
+                GfxDrawCall { instrs: vec![], dcs: vec![], z_index: 0 },
             )]),
-            pending_batches: HashMap::new(),
-            dropped_batches: Box::new(HashSet::new()),
 
             textures: Box::new(HashMap::new()),
             buffers: Box::new(HashMap::new()),
@@ -673,7 +734,6 @@ impl Stage {
         self_.pruner.textures = &*self_.textures as *const _;
         self_.pruner.buffers = &*self_.buffers as *const _;
         self_.pruner.anims = &*self_.anims as *const _;
-        self_.pruner.dropped_batches = &mut *self_.dropped_batches as *mut _;
         self_
     }
 
@@ -697,60 +757,13 @@ impl Stage {
             GraphicsMethod::UpdateSeqAnim { id, frame_idx, frame, tag: _ } => {
                 self.method_update_anim(*id, *frame_idx, frame.clone())
             }
+            GraphicsMethod::PauseSeqAnim { id, frame_idx, duration_ms, tag: _ } => {
+                self.method_pause_anim(*id, *frame_idx, *duration_ms)
+            }
             GraphicsMethod::DeleteSeqAnim((ganim_id, _)) => self.method_delete_anim(*ganim_id),
-            GraphicsMethod::ReplaceGfxDrawCalls { batch_id, ref mut dcs } => {
-                match batch_id {
-                    Some(bid) => {
-                        //let debug_strs: Vec<_> = dcs.iter().map(|(_, dc)| dc.debug_str).collect();
-                        //t!("Commit dc to {bid}: {debug_strs:?}");
-                        if self.dropped_batches.contains(&bid) {
-                            t!("Discarding ReplaceGfxDrawCalls from dropped {bid}");
-                            return
-                        }
-                        let Some(batch) = self.pending_batches.get_mut(&bid) else {
-                            panic!("unknown batch {bid}")
-                        };
-                        let method = std::mem::take(&mut method);
-                        batch.push(method);
-                    }
-                    None => {
-                        // Process immediately without batching
-                        let timest = unixtime();
-                        let dcs = std::mem::take(dcs);
-                        self.method_replace_draw_calls(timest, dcs);
-                    }
-                }
-            }
-            GraphicsMethod::StartBatch { batch_id, tag } => {
-                if DEBUG_GFXAPI {
-                    t!("Start batch {batch_id}: {tag:?}");
-                }
-                if !self.pending_batches.insert(*batch_id, vec![]).is_none() {
-                    panic!("batch {batch_id} already open!")
-                }
-            }
-            GraphicsMethod::EndBatch { batch_id, timest } => {
-                if self.dropped_batches.remove(batch_id) {
-                    if DEBUG_GFXAPI {
-                        t!("End batch {batch_id} was dropped");
-                    }
-                    return
-                }
-                if DEBUG_GFXAPI {
-                    t!("End batch {batch_id}");
-                }
-                let Some(batch) = self.pending_batches.remove(batch_id) else {
-                    panic!("unknown batch {batch_id}")
-                };
-                for mut method in batch {
-                    match &mut method {
-                        GraphicsMethod::ReplaceGfxDrawCalls { batch_id: _, dcs } => {
-                            let dcs = std::mem::take(dcs);
-                            self.method_replace_draw_calls(*timest, dcs)
-                        }
-                        _ => panic!("unexpected method in batch!"),
-                    }
-                }
+            GraphicsMethod::ReplaceGfxDrawCalls { ref mut dcs } => {
+                let dcs = std::mem::take(dcs);
+                self.method_replace_draw_calls(dcs);
             }
             GraphicsMethod::Noop => panic!("noop"),
         }
@@ -876,30 +889,27 @@ impl Stage {
             d!("Invoked method: delete_anim({} => {:?})", gfx_anim_id, anim);
         }
     }
-    fn method_replace_draw_calls(&mut self, batch_timest: Timestamp, dcs: Vec<(DcId, DrawCall)>) {
+    pub(self) fn method_pause_anim(
+        &mut self,
+        gfx_anim_id: AnimId,
+        frame_idx: usize,
+        duration_ms: u64,
+    ) {
+        let Some(anim) = self.anims.get_mut(&gfx_anim_id) else {
+            panic!("couldn't find anim {gfx_anim_id}");
+        };
+        if DEBUG_GFXAPI {
+            d!("Invoked method: pause_anim({gfx_anim_id}[{frame_idx}] for {duration_ms}ms)");
+        }
+        anim.hold(frame_idx, duration_ms);
+    }
+    fn method_replace_draw_calls(&mut self, dcs: Vec<(DcId, DrawCall)>) {
         if DEBUG_GFXAPI {
             d!("Invoked method: replace_draw_calls({:?})", dcs);
         }
 
-        // Phase 1: Check for conflicts with newer batches
-        // If any draw call in this batch belongs to an older batch than the existing one,
-        // reject the entire batch to maintain atomicity
-        for (key, _) in &dcs {
-            if let Some(old_val) = self.draw_calls.get(key) {
-                if old_val.timest > batch_timest {
-                    // Entire batch is stale, reject all
-                    t!("Rejected stale batch {batch_timest}: conflict with newer batch {} on {key}", old_val.timest);
-                    return;
-                }
-            }
-        }
-
-        // Phase 2: Apply entire batch atomically
-        self.apply_draw_calls(batch_timest, dcs)
-    }
-    pub(self) fn apply_draw_calls(&mut self, batch_timest: Timestamp, dcs: Vec<(DcId, DrawCall)>) {
         for (key, val) in dcs {
-            let val = val.compile(&self.textures, &self.buffers, batch_timest);
+            let val = val.compile(&self.textures, &self.buffers);
 
             // Insert/replace draw call
             self.draw_calls.insert(key, val);
@@ -936,10 +946,9 @@ impl Stage {
     #[instrument(skip_all, target = "gfx::pruner")]
     fn prime_screen(&mut self) {
         let methods = self.pruner.recv_all();
-        assert!(self.pending_batches.is_empty());
         // Process all cached methods by the pruner from while the screen was off.
         for method in methods {
-            // We discard batches here but process_method uses them so implement this
+            // We discard draw calls here but process_method uses them so implement this
             // workaround.
             match method {
                 GraphicsMethod::NewTexture(_) |
@@ -949,11 +958,10 @@ impl Stage {
                 GraphicsMethod::DeleteBuffer(_) |
                 GraphicsMethod::NewSeqAnim { .. } |
                 GraphicsMethod::UpdateSeqAnim { .. } |
+                GraphicsMethod::PauseSeqAnim { .. } |
                 GraphicsMethod::DeleteSeqAnim(_) => self.process_method(method),
 
-                GraphicsMethod::ReplaceGfxDrawCalls { .. } |
-                GraphicsMethod::StartBatch { .. } |
-                GraphicsMethod::EndBatch { .. } => {
+                GraphicsMethod::ReplaceGfxDrawCalls { .. } => {
                     panic!("unsupported pruned methods should be dropped!")
                 }
 
@@ -964,22 +972,134 @@ impl Stage {
         // Trigger a full screen redraw by sending a resize event
         let (width, height) = miniquad::window::screen_size();
         self.event_pub.notify_resize(Dimension::from([width, height]));
+
+        #[cfg(target_os = "android")]
+        {
+            crate::android::request_apply_insets();
+        }
     }
 
-    fn close_pending_batches(&mut self) {
-        // Immediately apply any pending batches when the screen is switched off
-        let batch_ids: Vec<_> = self.pending_batches.keys().cloned().collect();
-        if !batch_ids.is_empty() {
-            t!("Force closing pending batches: {batch_ids:?}");
+    /// Release the offscreen render target and quad of the CRT pass
+    fn free_crt_resources(&mut self) {
+        if let Some(pass) = self.crt_pass.take() {
+            self.ctx.delete_render_pass(pass);
+        }
+        if let Some(texture) = self.crt_texture.take() {
+            self.ctx.delete_texture(texture);
+        }
+        if let Some(buffer) = self.crt_vertex_buffer.take() {
+            self.ctx.delete_buffer(buffer);
+        }
+        if let Some(buffer) = self.crt_index_buffer.take() {
+            self.ctx.delete_buffer(buffer);
+        }
+        self.crt_size = (0, 0);
+    }
+
+    /// Current CRT parameters, interpolated from CRT_START towards zero with
+    /// smoothstep easing. None once the fade has finished.
+    fn crt_current_params(&mut self) -> Option<CrtParams> {
+        let start = *self.crt_start.get_or_insert_with(std::time::Instant::now);
+        let t = (start.elapsed().as_secs_f32() / CRT_FADE_SECS).clamp(0., 1.);
+        if t >= 1. {
+            return None
+        }
+        let s = 1. - t * t * (3. - 2. * t);
+        Some(CrtParams {
+            chromatic_aberration: CRT_START.chromatic_aberration * s,
+            blur_amount: CRT_START.blur_amount * s,
+            blur_radius: CRT_START.blur_radius * s,
+            glow_intensity: CRT_START.glow_intensity * s,
+            brightness: 1. + (CRT_START.brightness - 1.) * s,
+        })
+    }
+
+    /// (Re)create the offscreen render target and fullscreen quad used by
+    /// the CRT post-processing pass. Recreates on window resize.
+    fn ensure_crt_pass(&mut self) {
+        let (w, h) = window::screen_size();
+        let w = (w.round() as u32).max(1);
+        let h = (h.round() as u32).max(1);
+
+        if self.crt_size == (w, h) && self.crt_pass.is_some() {
+            return
         }
 
-        for batch_id in batch_ids {
-            self.process_method(GraphicsMethod::EndBatch { batch_id, timest: unixtime() });
-            if !self.dropped_batches.insert(batch_id) {
-                panic!("dropped batch {batch_id} already exits!");
-            }
-        }
-        assert!(self.pending_batches.is_empty());
+        self.free_crt_resources();
+
+        let texture = self.ctx.new_render_texture(TextureParams {
+            width: w,
+            height: h,
+            format: TextureFormat::RGBA8,
+            wrap: TextureWrap::Clamp,
+            min_filter: miniquad::FilterMode::Linear,
+            mag_filter: miniquad::FilterMode::Linear,
+            ..Default::default()
+        });
+        let pass = self.ctx.new_render_pass(texture, None);
+
+        // Screen resolution is passed to the shader via vertex colors.
+        // GL render targets store the first row at v=0 (bottom) so flip v,
+        // Metal stores it at v=0 (top) so keep it as-is.
+        let is_gl = self.ctx.info().backend == miniquad::Backend::OpenGl;
+        let (v_top, v_bottom) = if is_gl { (1., 0.) } else { (0., 1.) };
+        let verts = [
+            Vertex { pos: [0., 0.], color: [w as f32, h as f32, 0., 1.], uv: [0., v_top] },
+            Vertex { pos: [1., 0.], color: [w as f32, h as f32, 0., 1.], uv: [1., v_top] },
+            Vertex { pos: [1., 1.], color: [w as f32, h as f32, 0., 1.], uv: [1., v_bottom] },
+            Vertex { pos: [0., 1.], color: [w as f32, h as f32, 0., 1.], uv: [0., v_bottom] },
+        ];
+        let vertex_buffer = self.ctx.new_buffer(
+            BufferType::VertexBuffer,
+            BufferUsage::Immutable,
+            BufferSource::slice(&verts),
+        );
+
+        let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
+        let index_buffer = self.ctx.new_buffer(
+            BufferType::IndexBuffer,
+            BufferUsage::Immutable,
+            BufferSource::slice(&indices),
+        );
+
+        self.crt_texture = Some(texture);
+        self.crt_pass = Some(pass);
+        self.crt_vertex_buffer = Some(vertex_buffer);
+        self.crt_index_buffer = Some(index_buffer);
+        self.crt_size = (w, h);
+    }
+
+    /// Blit the offscreen scene to the screen through the CRT shader
+    fn draw_crt(&mut self, params: CrtParams) {
+        self.ctx.begin_default_pass(PassAction::clear_color(0., 0., 0., 1.));
+        self.ctx.apply_pipeline(&self.crt_pipeline);
+
+        // Same top-left (0, 0) bottom-right (1, 1) projection, identity model
+        let proj = glam::Mat4::from_translation(glam::Vec3::new(-1., 1., 0.)) *
+            glam::Mat4::from_scale(glam::Vec3::new(2., -2., 1.));
+        let model = glam::Mat4::IDENTITY;
+
+        // Two mat4s followed by the five CRT parameter floats
+        let mut uniforms_data = [0u8; 148];
+        let data: [u8; 64] = unsafe { std::mem::transmute_copy(&proj) };
+        uniforms_data[0..64].copy_from_slice(&data);
+        let data: [u8; 64] = unsafe { std::mem::transmute_copy(&model) };
+        uniforms_data[64..128].copy_from_slice(&data);
+        uniforms_data[128..132].copy_from_slice(&params.chromatic_aberration.to_ne_bytes());
+        uniforms_data[132..136].copy_from_slice(&params.blur_amount.to_ne_bytes());
+        uniforms_data[136..140].copy_from_slice(&params.blur_radius.to_ne_bytes());
+        uniforms_data[140..144].copy_from_slice(&params.glow_intensity.to_ne_bytes());
+        uniforms_data[144..148].copy_from_slice(&params.brightness.to_ne_bytes());
+        self.ctx.apply_uniforms_from_bytes(uniforms_data.as_ptr(), uniforms_data.len());
+
+        let bindings = Bindings {
+            vertex_buffers: vec![self.crt_vertex_buffer.unwrap()],
+            index_buffer: self.crt_index_buffer.unwrap(),
+            images: vec![self.crt_texture.unwrap()],
+        };
+        self.ctx.apply_bindings(&bindings);
+        self.ctx.draw(0, 6, 1);
+        self.ctx.end_render_pass();
     }
 }
 
@@ -1028,18 +1148,24 @@ impl EventHandler for Stage {
         self.screen_state.update(self.egl_ctx_is_disabled());
         if self.screen_state != old_screen_state {
             d!("Switching screen state {old_screen_state:?} => {:?}", self.screen_state);
+
+            match self.screen_state {
+                ScreenState::SwitchOff => {
+                    self.event_pub.notify_screen_changed(false);
+                }
+                ScreenState::ReadyOn => {
+                    self.event_pub.notify_screen_changed(true);
+                }
+                _ => {}
+            }
         }
 
         match self.screen_state {
             ScreenState::SwitchOff => {
-                self.close_pending_batches();
-
                 // Screen is off so collect all methods into the pruner
                 self.pruner.drain(&self.method_recv);
             }
             ScreenState::Off => {
-                assert!(self.pending_batches.is_empty());
-
                 // Screen is off so collect all methods into the pruner
                 self.pruner.drain(&self.method_recv);
             }
@@ -1065,7 +1191,24 @@ impl EventHandler for Stage {
     }
 
     fn draw(&mut self) {
-        self.ctx.begin_default_pass(PassAction::clear_color(0., 0., 0., 1.));
+        let crt_params = self.crt_current_params();
+
+        // Keep the offscreen pass alive only while the effect is fading in
+        // strength; drop it once the parameters have reached zero
+        if crt_params.is_some() {
+            self.ensure_crt_pass();
+        } else if self.crt_pass.is_some() {
+            self.free_crt_resources();
+        }
+        let crt_pass = self.crt_pass;
+
+        // Render the scene into the offscreen CRT render target when available,
+        // otherwise straight to the default framebuffer
+        if let Some(pass) = crt_pass {
+            self.ctx.begin_pass(Some(pass), PassAction::clear_color(0., 0., 0., 1.));
+        } else {
+            self.ctx.begin_default_pass(PassAction::clear_color(0., 0., 0., 1.));
+        }
 
         // Apply default RGB pipeline
         self.ctx.apply_pipeline(&self.loaded_pipelines[GraphicPipeline::RGB as usize]);
@@ -1075,12 +1218,13 @@ impl EventHandler for Stage {
         let proj = glam::Mat4::from_translation(glam::Vec3::new(-1., 1., 0.)) *
             glam::Mat4::from_scale(glam::Vec3::new(2., -2., 1.));
 
-        let mut uniforms_data = [0u8; 128];
+        let mut uniforms_data = [0u8; 132];
         let data: [u8; 64] = unsafe { std::mem::transmute_copy(&proj) };
         uniforms_data[0..64].copy_from_slice(&data);
+        uniforms_data[128..132].copy_from_slice(&1.0f32.to_ne_bytes());
         //let data: [u8; 64] = unsafe { std::mem::transmute_copy(&model) };
         //uniforms_data[64..].copy_from_slice(&data);
-        assert_eq!(128, 2 * UniformType::Mat4.size());
+        assert_eq!(132, 2 * UniformType::Mat4.size() + UniformType::Float1.size());
 
         let (screen_w, screen_h) = miniquad::window::screen_size();
 
@@ -1099,12 +1243,19 @@ impl EventHandler for Stage {
             view: Rectangle::from([0., 0., screen_w, screen_h]),
             cursor: Point::zero(),
             gfx_pipeline: GraphicPipeline::RGB,
+            alpha: 1.,
             anims: &mut self.anims,
             overlays: vec![],
         };
         render_ctx.draw();
 
         self.ctx.end_render_pass();
+
+        // Post-process the offscreen scene through the CRT shader
+        if let (Some(_), Some(params)) = (crt_pass, crt_params) {
+            self.draw_crt(params);
+        }
+
         self.ctx.commit_frame();
     }
 
@@ -1159,27 +1310,16 @@ impl EventHandler for Stage {
             self.window_node = god.app.sg_root.lookup_node("/window");
         }
 
-        // Clone window_node to avoid borrow conflict with RenderApiSync
-        let window_node = self.window_node.clone();
-
-        // Create RenderApiSync for direct graphics operations
-        let renderer_sync = RendererSync::new(self);
-
-        // Direct call to Window's handle_touch_event_sync
-        if let Some(window_node) = &window_node {
+        if let Some(window_node) = &self.window_node {
             match window_node.pimpl() {
                 Pimpl::Window(win) => {
-                    if win.handle_touch_sync(&renderer_sync, phase, id, pos) {
-                        return
-                    }
+                    // All touch interaction flows through the gesture
+                    // session, fed here at the Stage entry.
+                    win.feed_gesture(phase, id, pos);
                 }
                 _ => panic!(),
             }
         }
-
-        drop(renderer_sync);
-
-        self.event_pub.notify_touch(phase, id, pos);
     }
 
     fn quit_requested_event(&mut self) {
@@ -1187,7 +1327,32 @@ impl EventHandler for Stage {
         let god = GOD.get().unwrap();
         god.stop_app();
     }
+
+    fn window_minimized_event(&mut self) {
+        debug!(target: "gfx", "window minimized");
+        #[cfg(target_os = "android")]
+        {
+            miniquad::window::set_sleep_interval(None);
+
+            // Drive the screen-off transition here instead of waiting for the
+            // next update() tick: with the event loop paused there may be no
+            // ticks until the screen comes back on.
+            self.screen_state = ScreenState::SwitchOff;
+            self.event_pub.notify_screen_changed(false);
+            self.pruner.drain(&self.method_recv);
+        }
+    }
+
+    fn window_restored_event(&mut self) {
+        debug!(target: "gfx", "window restored");
+        #[cfg(target_os = "android")]
+        miniquad::window::set_sleep_interval(Some(SLEEP_INTERVAL_MS));
+    }
 }
+
+/// Android: periodic wakeup interval for the blocking event loop.
+/// Used in the `Conf` and restored in `window_restored_event`.
+const SLEEP_INTERVAL_MS: u32 = 40;
 
 pub fn run_gui(linux_backend: miniquad::conf::LinuxBackend) {
     let mut window_width = 1024;
@@ -1208,8 +1373,7 @@ pub fn run_gui(linux_backend: miniquad::conf::LinuxBackend) {
             linux_backend,
             #[cfg(target_os = "android")]
             blocking_event_loop: true,
-            #[cfg(target_os = "android")]
-            sleep_interval_ms: Some(40),
+            sleep_interval_ms: Some(SLEEP_INTERVAL_MS),
             android_panic_hook: false,
             ..Default::default()
         },

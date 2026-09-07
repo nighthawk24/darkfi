@@ -50,34 +50,26 @@ pub async fn make(
     )
     .await;
 
-    let step1_is_visible =
-        PropertyBool::wrap(&send_step1_layer, Role::App, "is_visible", 0).unwrap();
-
     let send_step2_layer = send_step2::make(
         app,
         wallet_layer.clone(),
         i18n_fish,
         window_scale.clone(),
         send_tx_data.clone(),
-        step1_is_visible.clone(),
     )
     .await;
 
     let step2_is_visible =
         PropertyBool::wrap(&send_step2_layer, Role::App, "is_visible", 0).unwrap();
 
-    let send_step3_layer = send_step3::make(
+    let _send_step3_layer = send_step3::make(
         app,
         wallet_layer.clone(),
         i18n_fish,
         window_scale.clone(),
         send_tx_data.clone(),
-        step2_is_visible.clone(),
     )
     .await;
-
-    let step3_is_visible =
-        PropertyBool::wrap(&send_step3_layer, Role::App, "is_visible", 0).unwrap();
 
     let _send_step4_layer = send_step4::make(
         app,
@@ -85,7 +77,6 @@ pub async fn make(
         i18n_fish,
         window_scale.clone(),
         send_tx_data.clone(),
-        step3_is_visible.clone(),
     )
     .await;
 
@@ -95,7 +86,7 @@ pub async fn make(
 
     // Add listener for tx built signal to update send button label and show fee
     let set_built_tx_sub = tx_status_layer.subscribe_method_call("set_built_tx").unwrap();
-    let renderer_for_built = app.renderer.clone();
+    let redraw_for_built = app.redraw_trigger.clone();
     let sg_root_for_built = app.sg_root.clone();
     app.tasks.lock().unwrap().push(app.ex.spawn(async move {
         while let Ok(mcall) = set_built_tx_sub.receive().await {
@@ -110,7 +101,7 @@ pub async fn make(
                 }
             }
 
-            let atom = &mut renderer_for_built.make_guard(gfxtag!("tx built - update send button"));
+            let atom = &mut redraw_for_built.make_guard(gfxtag!("tx built - update send button"));
 
             // Make send button active
             if let Some(send_label_node) = sg_root_for_built

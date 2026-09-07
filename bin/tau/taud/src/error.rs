@@ -37,6 +37,8 @@ pub enum TaudError {
     DecryptionError(String),
     #[error("IO Error: `{0}`")]
     IoError(String),
+    #[error("KVDB error: `{0}`")]
+    Kvdb(#[from] kvdb_overlay::Error),
 }
 
 pub type TaudResult<T> = std::result::Result<T, TaudError>;
@@ -76,6 +78,9 @@ pub fn to_json_result(res: TaudResult<JsonValue>, id: i64) -> JsonResult {
                 JsonError::new(ErrorCode::InternalError, Some(e.to_string()), id).into()
             }
             TaudError::IoError(e) => JsonError::new(ErrorCode::InternalError, Some(e), id).into(),
+            TaudError::Kvdb(e) => {
+                JsonError::new(ErrorCode::InternalError, Some(e.to_string()), id).into()
+            }
         },
     }
 }

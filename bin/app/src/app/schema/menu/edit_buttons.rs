@@ -105,9 +105,11 @@ pub async fn create_edit_buttons(
     prop.set_expr(atom, Role::App, 2, code).unwrap();
     prop.set_f32(atom, Role::App, 3, MENU_BTN_H).unwrap();
     node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
+    // The edit-mode bar floats above the version block (z_index 3)
+    node.set_property_u32(atom, Role::App, "z_index", 4).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
-    let editlayer_node = node.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let editlayer_node =
+        node.setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     parent.link(editlayer_node.clone());
 
     let editlayer_is_visible =
@@ -153,7 +155,9 @@ pub async fn create_edit_buttons(
         COLOR_CYAN,
     );
 
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     editlayer_node.link(node);
 
     // Create the cancel button
@@ -165,11 +169,12 @@ pub async fn create_edit_buttons(
     prop.set_f32(atom, Role::App, 2, MENU_BTN_W_L).unwrap();
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
 
-    let cancel_btn = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let cancel_btn =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     editlayer_node.link(cancel_btn.clone());
 
     // Text for cancel button
-    let node = create_text("cancel");
+    let node = create_text("cancel_text");
     let prop = node.get_property("rect").unwrap();
     prop.set_f32(atom, Role::App, 0, 0.).unwrap();
     prop.set_f32(atom, Role::App, 1, BTN_TEXT_Y).unwrap();
@@ -189,7 +194,15 @@ pub async fn create_edit_buttons(
     prop.set_f32(atom, Role::App, 3, COLOR_RED[3]).unwrap();
 
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     editlayer_node.link(node);
 
@@ -203,7 +216,8 @@ pub async fn create_edit_buttons(
     prop.set_f32(atom, Role::App, 2, MENU_BTN_W_R).unwrap();
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
 
-    let done_btn = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let done_btn =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     editlayer_node.link(done_btn.clone());
 
     // Text for done button
@@ -228,7 +242,15 @@ pub async fn create_edit_buttons(
     prop.set_f32(atom, Role::App, 3, COLOR_CYAN[3]).unwrap();
 
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     editlayer_node.link(node);
 
@@ -245,13 +267,13 @@ impl EditButtons {
         // Subscribe to edit_active signal
         let (slot, recvr) = Slot::new("edit_activated");
         menu_node.register("edit_active", slot).unwrap();
-        let renderer = app.renderer.clone();
+        let redraw = app.redraw_trigger.clone();
         let editlayer = self.editlayer_is_visible.clone();
         let sibling_on = sibling.clone();
         let task = app.ex.spawn(async move {
             while let Ok(_) = recvr.recv().await {
                 debug!(target: "app::menu", "menu edit active");
-                let atom = &mut renderer.make_guard(gfxtag!("edit_active"));
+                let atom = &mut redraw.make_guard(gfxtag!("edit_active"));
                 if let Some(s) = &sibling_on {
                     s.set(atom, false);
                 }
@@ -292,12 +314,12 @@ impl EditButtons {
         let (slot, recvr) = Slot::new(slot_name);
         btn.register("click", slot).unwrap();
         let menu_node = menu_node.clone();
-        let renderer = app.renderer.clone();
+        let redraw = app.redraw_trigger.clone();
         let editlayer = self.editlayer_is_visible.clone();
         let task = app.ex.spawn(async move {
             while let Ok(_) = recvr.recv().await {
                 menu_node.call_method(method, vec![]).await.unwrap();
-                let atom = &mut renderer.make_guard(gfxtag!(slot_name));
+                let atom = &mut redraw.make_guard(gfxtag!(slot_name));
                 editlayer.set(atom, false);
                 if let Some(s) = &sibling {
                     s.set(atom, true);

@@ -40,7 +40,7 @@ impl TryFrom<u8> for DeployFunction {
     }
 }
 
-#[cfg(not(feature = "no-entrypoint"))]
+#[cfg(all(not(feature = "no-entrypoint"), target_arch = "wasm32"))]
 /// WASM entrypoint functions
 pub mod entrypoint;
 
@@ -54,7 +54,7 @@ pub mod error;
 /// Client API for interaction with this smart contract
 pub mod client;
 
-// These are the different sled trees that will be created
+// These are the different kvdb trees that will be created
 pub const DEPLOY_CONTRACT_INFO_TREE: &str = "info";
 pub const DEPLOY_CONTRACT_LOCK_TREE: &str = "lock";
 

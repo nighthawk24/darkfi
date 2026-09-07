@@ -27,14 +27,15 @@ use crate::{
     expr::SExprCode,
     pubsub::{Publisher, PublisherPtr, Subscription},
     scene::{SceneNodeId, SceneNodeWeak},
+    ui::VectorShape,
 };
 
 mod guard;
-pub use guard::{BatchGuardId, BatchGuardPtr, PropertyAtomicGuard};
+pub use guard::{BatchGuardPtr, PropertyAtomicGuard};
 mod wrap;
 pub use wrap::{
     PropertyBool, PropertyColor, PropertyDimension, PropertyEnum, PropertyFloat32, PropertyRect,
-    PropertyStr, PropertyUint32,
+    PropertyShape, PropertyStr, PropertyUint32,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, SerialEncodable, SerialDecodable)]
@@ -48,6 +49,7 @@ pub enum PropertyType {
     Enum = 5,
     SceneNodeId = 7,
     SExpr = 8,
+    VectorShape = 9,
 }
 
 impl PropertyType {
@@ -61,6 +63,7 @@ impl PropertyType {
             Self::Enum => PropertyValue::Enum(String::new()),
             Self::SceneNodeId => PropertyValue::SceneNodeId(0),
             Self::SExpr => PropertyValue::SExpr(Arc::new(vec![])),
+            Self::VectorShape => PropertyValue::VectorShape(Arc::new(VectorShape::new())),
         }
     }
 }
@@ -74,6 +77,7 @@ pub enum PropertySubType {
     Pixel = 2,
     ResourceId = 3,
     Locale = 4,
+    Flag = 5,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -95,6 +99,7 @@ pub enum PropertyValue {
     Enum(String),
     SceneNodeId(SceneNodeId),
     SExpr(Arc<SExprCode>),
+    VectorShape(Arc<VectorShape>),
 }
 
 impl PropertyValue {
@@ -109,6 +114,7 @@ impl PropertyValue {
             Self::Enum(_) => PropertyType::Enum,
             Self::SceneNodeId(_) => PropertyType::SceneNodeId,
             Self::SExpr(_) => PropertyType::SExpr,
+            Self::VectorShape(_) => PropertyType::VectorShape,
         }
     }
 
@@ -175,6 +181,13 @@ impl PropertyValue {
             _ => Err(Error::PropertyWrongType),
         }
     }
+
+    pub fn as_shape(&self) -> Result<Arc<VectorShape>> {
+        match self {
+            Self::VectorShape(v) => Ok(v.clone()),
+            _ => Err(Error::PropertyWrongType),
+        }
+    }
 }
 
 impl Encodable for PropertyValue {
@@ -191,6 +204,7 @@ impl Encodable for PropertyValue {
             Self::Enum(v) => v.encode(s),
             Self::SceneNodeId(v) => v.encode(s),
             Self::SExpr(v) => v.encode(s),
+            Self::VectorShape(v) => v.encode(s),
         }
     }
 }
@@ -201,6 +215,7 @@ pub enum ModifyAction {
     Set(usize),
     SetVec,
     SetCache(Vec<usize>),
+    Unset(usize),
     Push(usize),
     Insert(usize),
     Remove(usize, PropertyValue),
@@ -402,7 +417,7 @@ impl Property {
             }
             vals[i] = PropertyValue::Unset;
         }
-        atom.add(self.clone(), role, ModifyAction::Set(i));
+        atom.add(self.clone(), role, ModifyAction::Unset(i));
         Ok(())
     }
 
@@ -541,6 +556,18 @@ impl Property {
             }
             vals[i] = PropertyValue::SExpr(Arc::new(val));
         }
+        atom.add(self.clone(), role, ModifyAction::Set(i));
+        Ok(())
+    }
+
+    pub fn set_shape(
+        self: &Arc<Self>,
+        atom: &mut PropertyAtomicGuard,
+        role: Role,
+        i: usize,
+        val: VectorShape,
+    ) -> Result<()> {
+        self.set_raw_value(i, PropertyValue::VectorShape(Arc::new(val)))?;
         atom.add(self.clone(), role, ModifyAction::Set(i));
         Ok(())
     }
@@ -967,6 +994,23 @@ impl Property {
         }
     }
 
+    // Remove by item
+
+    pub fn remove_str_item(
+        self: &Arc<Self>,
+        atom: &mut PropertyAtomicGuard,
+        role: Role,
+        item: &str,
+    ) -> Option<usize> {
+        for i in 0..self.get_len() {
+            if self.get_str(i).unwrap() == item {
+                self.remove_str(atom, role, i).unwrap();
+                return Some(i)
+            }
+        }
+        None
+    }
+
     // Get
 
     pub fn is_bounded(&self) -> bool {
@@ -1094,6 +1138,10 @@ impl Property {
         self.get_raw_value(i)?.as_sexpr()
     }
 
+    pub fn get_shape(&self, i: usize) -> Result<Arc<VectorShape>> {
+        self.get_value(i)?.as_shape()
+    }
+
     pub fn get_cached(&self, i: usize) -> Result<PropertyValue> {
         let cache = &self.cache.lock().unwrap();
         if self.is_bounded() {
@@ -1166,6 +1214,19 @@ impl Property {
         })
     }
 
+    // Contains
+
+    pub fn contains_str(&self, s: &str) -> bool {
+        for i in 0..self.get_len() {
+            if let Ok(item) = self.get_str(i) {
+                if item == s {
+                    return true
+                }
+            }
+        }
+        false
+    }
+
     // Subs
 
     pub fn subscribe_modify(&self) -> Subscription<(Role, ModifyAction, BatchGuardPtr)> {
@@ -1203,7 +1264,30 @@ impl std::fmt::Debug for Property {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::Op;
+    use crate::{expr::Op, ui::VectorShape as Shape};
+
+    #[test]
+    fn test_shape() {
+        let mut shape = Shape::new();
+        shape.add_filled_box(
+            vec![Op::ConstFloat32(0.)],
+            vec![Op::ConstFloat32(0.)],
+            vec![Op::ConstFloat32(10.)],
+            vec![Op::ConstFloat32(10.)],
+            [0., 0., 0., 1.],
+        );
+
+        let prop =
+            Arc::new(Property::new("shape", PropertyType::VectorShape, PropertySubType::Null));
+        let atom = &mut PropertyAtomicGuard::none();
+        // Default is an empty shape
+        assert_eq!(prop.get_shape(0).unwrap().verts.len(), 0);
+        prop.set_shape(atom, Role::App, 0, shape).unwrap();
+        assert_eq!(prop.get_shape(0).unwrap().verts.len(), 4);
+        assert_eq!(prop.get_shape(0).unwrap().indices.len(), 6);
+        // Wrong index
+        assert!(prop.set_shape(atom, Role::App, 4, Shape::new()).is_err());
+    }
 
     #[test]
     fn test_getset() {

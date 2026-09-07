@@ -4,7 +4,7 @@ version = "0.5.0"
 homepage = "https://dark.fi"
 description = "Anonymous. Uncensored. Sovereign."
 authors = ["Dyne.org foundation <foundation@dyne.org>"]
-repository = "https://codeberg.org/darkrenaissance/darkfi"
+repository = "https://git.dark.fi/darkrenaissance/darkfi"
 license = "AGPL-3.0-only"
 edition = "2021"
 
@@ -116,10 +116,10 @@ wasmer-compiler-singlepass = {version = "6.1.0", optional = true}
 wasmer-middlewares = {version = "6.1.0", optional = true}
 
 # Blockchain store
-sled-overlay = {version = "0.1.20", optional = true}
+kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", version = "0.1.0", optional = true}
 
 # Miner
-randomx = {git = "https://codeberg.org/darkrenaissance/RandomX", rev = "0e31d5a", optional = true}
+randomx = {git = "https://git.dark.fi/darkrenaissance/RandomX", rev = "0e31d5a", optional = true}
 monero = {version = "0.21.0", optional = true}
 tiny-keccak = { version = "2.0.2", features = ["keccak"], optional = true }
 
@@ -146,7 +146,7 @@ async-sdk = [
 ]
 
 blockchain = [
-    "sled-overlay",
+    "kvdb-overlay",
     "monero",
     "num-bigint",
     "primitive-types",
@@ -154,7 +154,8 @@ blockchain = [
     "tiny-keccak",
 
     "darkfi-serial/num-bigint",
-    "darkfi-serial/sled-overlay",
+    "darkfi-serial/kvdb-overlay",
+    "darkfi-sdk/monotree",
 
     "tx",
     "util",
@@ -183,8 +184,8 @@ geode = [
 event-graph = [
     "async-std",
     "blake3",
+    "kvdb-overlay",
     "num-bigint",
-    "sled-overlay",
     "smol",
     "tinyjson",
     "bs58",
@@ -329,7 +330,7 @@ dht = [
 halo2_proofs = {git="https://github.com/parazyd/halo2", branch="v050"}
 halo2_gadgets = {git="https://github.com/parazyd/halo2", branch="v050"}
 # Forked "url" crate with added P2P schemas
-url = {git="https://github.com/darkrenaissance/rust-url", branch="v258"}
+url = {git="https://git.dark.fi/darkrenaissance/rust-url", branch="v258"}
 
 [[bench]]
 name = "zk_arith"
@@ -340,9 +341,9 @@ name = "zk_from_json"
 harness = false
 path = "bench/zk_from_json.rs"
 [[bench]]
-name = "sled"
+name = "kvdb"
 harness = false
-path = "bench/sled.rs"
+path = "bench/kvdb.rs"
 
 # Crossbeam SkipMap vs Mutex protected HashMap.
 # Uncomment to enable, and add the following to dev-dependencies:

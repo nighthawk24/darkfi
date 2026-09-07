@@ -26,8 +26,8 @@ use crate::{
     gfx::{
         gfxtag, DrawCall, DrawInstruction, GraphicsEventCharSub, GraphicsEventKeyDownSub,
         GraphicsEventKeyUpSub, GraphicsEventMouseButtonDownSub, GraphicsEventMouseButtonUpSub,
-        GraphicsEventMouseMoveSub, GraphicsEventMouseWheelSub, GraphicsEventPublisherPtr,
-        GraphicsEventTouchSub, Point, Rectangle, RenderApi, Renderer, RendererSync,
+        GraphicsEventMouseMoveSub, GraphicsEventMouseWheelSub, GraphicsEventPublisherPtr, Point,
+        Rectangle, RenderApi, Renderer,
     },
     prop::{
         BatchGuardPtr, PropertyAtomicGuard, PropertyDimension, PropertyFloat32, PropertyStr, Role,
@@ -40,10 +40,10 @@ use crate::{
 #[cfg(target_os = "android")]
 use crate::{android, prop::PropertyRect};
 
-use super::{get_children_ordered, get_ui_object3, get_ui_object_ptr, OnModify};
-
-mod gesture;
-pub use gesture::{GestureAction, GestureProcessor};
+use super::{
+    get_children_ordered, get_ui_object3, get_ui_object_ptr, GestureSession, GestureSessionPtr,
+    OnModify, RedrawTrigger,
+};
 
 macro_rules! i { ($($arg:tt)*) => { info!(target: "ui::window", $($arg)*); } }
 macro_rules! d { ($($arg:tt)*) => { debug!(target: "ui::window", $($arg)*); } }
@@ -68,8 +68,12 @@ pub struct Window {
     scale: PropertyFloat32,
     #[cfg(target_os = "android")]
     insets: PropertyRect,
-    /// Gesture processor for recognizing gestures
-    gesture_proc: SyncMutex<GestureProcessor>,
+    /// Window-level gesture recognition and delivery
+    gesture_session: GestureSessionPtr,
+    /// Sender side used by window-internal triggers to request a draw pass.
+    redraw_tx: RedrawTrigger,
+    /// Receiver consumed by the single draw-pass listener task in `start()`.
+    redraw_rx: async_channel::Receiver<()>,
 }
 
 impl Window {
@@ -77,12 +81,16 @@ impl Window {
         node: SceneNodeWeak,
         renderer: Renderer,
         i18n_fish: I18nBabelFish,
-        _setting_root: SceneNodePtr,
+        ex: ExecutorPtr,
+        redraw_tx: RedrawTrigger,
+        redraw_rx: async_channel::Receiver<()>,
     ) -> Pimpl {
         let node_ref = &node.upgrade().unwrap();
         let locale = PropertyStr::wrap(node_ref, Role::Internal, "locale", 0).unwrap();
         let screen_size = PropertyDimension::wrap(node_ref, Role::Internal, "screen_size").unwrap();
         let scale = PropertyFloat32::wrap(node_ref, Role::Internal, "scale", 0).unwrap();
+
+        let gesture_session = GestureSession::new(node.clone(), ex);
 
         let self_ = Arc::new(Self {
             node,
@@ -95,7 +103,9 @@ impl Window {
             scale,
             #[cfg(target_os = "android")]
             insets: PropertyRect::wrap(node_ref, Role::Internal, "insets").unwrap(),
-            gesture_proc: SyncMutex::new(GestureProcessor::new()),
+            gesture_session,
+            redraw_tx,
+            redraw_rx,
         });
 
         Pimpl::Window(self_)
@@ -130,10 +140,45 @@ impl Window {
                     panic!("self destroyed before modify_task was stopped!");
                 };
 
-                let atom = &mut self_.renderer.make_guard(gfxtag!("Window::resize_task"));
-                // Now update the properties
+                // Now update the properties. The guard triggers a redraw
+                // pass once the update batch has settled.
+                let atom = &mut self_.redraw_tx.make_guard(gfxtag!("Window::resize_task"));
                 screen_size2.set(atom, size);
+            }
+        });
 
+        let screen_sub = event_pub.subscribe_screen_changed();
+        let me2 = me.clone();
+        let screen_task = ex.spawn(async move {
+            while let Ok(screen_on) = screen_sub.recv().await {
+                let Some(self_) = me2.upgrade() else { break };
+
+                self_
+                    .node
+                    .upgrade()
+                    .unwrap()
+                    .trigger("screen_changed", darkfi_serial::serialize(&screen_on))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        // The serialized draw pass. Single consumer: one pass runs at a
+        // time. Triggers arriving during (or pending at the end of) a pass
+        // are coalesced by the bounded(1) queue into one trailing pass.
+        let me2 = me.clone();
+        let redraw_rx = self.redraw_rx.clone();
+        let redraw_task = ex.spawn(async move {
+            loop {
+                if redraw_rx.recv().await.is_err() {
+                    t!("Redraw trigger queue closed");
+                    break
+                }
+
+                let Some(self_) = me2.upgrade() else { break };
+                // A none() guard: the pass must not trigger a follow-on
+                // pass of itself when its own batch settles.
+                let atom = &mut PropertyAtomicGuard::none();
                 self_.draw(atom).await;
             }
         });
@@ -172,10 +217,6 @@ impl Window {
         let mouse_wheel_task =
             ex.spawn(async move { while Self::process_mouse_wheel(&me2, &ev_sub).await {} });
 
-        let ev_sub = event_pub.subscribe_touch();
-        let me2 = me.clone();
-        let touch_task = ex.spawn(async move { while Self::process_touch(&me2, &ev_sub).await {} });
-
         #[cfg(target_os = "android")]
         let insets_task = {
             let (insets_tx, insets_rx) = async_channel::unbounded();
@@ -186,10 +227,15 @@ impl Window {
             ex.spawn(async move {
                 while let Ok(insets_val) = insets_rx.recv().await {
                     let Some(self_) = me.upgrade() else { break };
-                    let atom = &mut self_.renderer.make_guard(gfxtag!("Window::insets_task"));
                     let scale = self_.scale.get();
                     let insets_val = Rectangle::from(insets_val) / scale;
                     t!("Insets changed: {insets_val:?}");
+
+                    // Insets are set with an internal role, so draw-pass
+                    // widgets skip the echo notifications. The guard
+                    // triggers a pass once the batch settles so the new
+                    // insets get laid out.
+                    let atom = &mut self_.redraw_tx.make_guard(gfxtag!("Window::insets_task"));
                     insets.set(atom, &insets_val);
                 }
             })
@@ -199,17 +245,17 @@ impl Window {
             let atom = &mut batch.spawn();
             self_.reload_locale(atom).await;
         }
-        async fn redraw(self_: Arc<Window>, batch: BatchGuardPtr) {
-            let atom = &mut batch.spawn();
-            self_.draw(atom).await;
-        }
 
         let mut on_modify = OnModify::new(ex.clone(), self.node.clone(), me.clone());
         on_modify.when_change(self.locale.prop(), reload_locale);
-        on_modify.when_change(self.scale.prop(), redraw);
+        on_modify.when_change(self.scale.prop(), |self_, _| async move {
+            self_.redraw_tx.trigger();
+        });
 
         let mut tasks = vec![
             resize_task,
+            screen_task,
+            redraw_task,
             char_task,
             key_down_task,
             key_up_task,
@@ -217,12 +263,13 @@ impl Window {
             mouse_btn_up_task,
             mouse_move_task,
             mouse_wheel_task,
-            touch_task,
         ];
         tasks.append(&mut on_modify.tasks);
         #[cfg(target_os = "android")]
         tasks.push(insets_task);
         *self.tasks.lock() = tasks;
+
+        self.node.upgrade().unwrap().trigger("start", vec![]).await.unwrap();
 
         for child in self.get_children() {
             let obj = get_ui_object_ptr(&child);
@@ -231,7 +278,11 @@ impl Window {
     }
 
     pub fn stop(&self) {
-        self.tasks.lock().clear();
+        let node = self.node.clone().upgrade().unwrap();
+        smol::block_on(async move {
+            node.trigger("stop", vec![]).await.unwrap();
+        });
+
         for child in self.get_children() {
             let obj = get_ui_object3(&child);
             obj.stop();
@@ -346,21 +397,6 @@ impl Window {
         true
     }
 
-    async fn process_touch(me: &Weak<Self>, ev_sub: &GraphicsEventTouchSub) -> bool {
-        let Ok((phase, id, touch_pos)) = ev_sub.recv().await else {
-            t!("Event relayer closed");
-            return false
-        };
-
-        let Some(self_) = me.upgrade() else {
-            // Should not happen
-            panic!("self destroyed before touch_task was stopped!");
-        };
-
-        self_.handle_touch(phase, id, touch_pos).await;
-        true
-    }
-
     fn get_children(&self) -> Vec<SceneNodePtr> {
         let node = self.node.upgrade().unwrap();
         get_children_ordered(&node)
@@ -400,14 +436,18 @@ impl Window {
     }
 
     async fn handle_mouse_btn_down(&self, btn: MouseButton, mut mouse_pos: Point) {
+        if EMULATE_TOUCH {
+            // Mouse-emulated touches produce real gestures through the
+            // session, exactly like device touches. feed_gesture()
+            // applies the window scale itself.
+            self.feed_gesture(TouchPhase::Started, 0, mouse_pos);
+        }
+
         self.local_scale(&mut mouse_pos);
-        for child in self.get_children() {
-            let obj = get_ui_object3(&child);
-            if EMULATE_TOUCH {
-                if obj.handle_touch(TouchPhase::Started, 0, mouse_pos).await {
-                    return
-                }
-            } else {
+
+        if !EMULATE_TOUCH {
+            for child in self.get_children() {
+                let obj = get_ui_object3(&child);
                 if obj.handle_mouse_btn_down(btn.clone(), mouse_pos).await {
                     return
                 }
@@ -416,14 +456,15 @@ impl Window {
     }
 
     async fn handle_mouse_btn_up(&self, btn: MouseButton, mut mouse_pos: Point) {
+        if EMULATE_TOUCH {
+            self.feed_gesture(TouchPhase::Ended, 0, mouse_pos);
+        }
+
         self.local_scale(&mut mouse_pos);
-        for child in self.get_children() {
-            let obj = get_ui_object3(&child);
-            if EMULATE_TOUCH {
-                if obj.handle_touch(TouchPhase::Ended, 0, mouse_pos).await {
-                    return
-                }
-            } else {
+
+        if !EMULATE_TOUCH {
+            for child in self.get_children() {
+                let obj = get_ui_object3(&child);
                 if obj.handle_mouse_btn_up(btn.clone(), mouse_pos).await {
                     return
                 }
@@ -432,14 +473,15 @@ impl Window {
     }
 
     async fn handle_mouse_move(&self, mut mouse_pos: Point) {
+        if EMULATE_TOUCH {
+            self.feed_gesture(TouchPhase::Moved, 0, mouse_pos);
+        }
+
         self.local_scale(&mut mouse_pos);
-        for child in self.get_children() {
-            let obj = get_ui_object3(&child);
-            if EMULATE_TOUCH {
-                if obj.handle_touch(TouchPhase::Moved, 0, mouse_pos).await {
-                    return
-                }
-            } else {
+
+        if !EMULATE_TOUCH {
+            for child in self.get_children() {
+                let obj = get_ui_object3(&child);
                 if obj.handle_mouse_move(mouse_pos).await {
                     return
                 }
@@ -457,57 +499,17 @@ impl Window {
         }
     }
 
-    async fn handle_touch(&self, phase: TouchPhase, id: u64, mut touch_pos: Point) {
-        self.local_scale(&mut touch_pos);
-
-        // Process through gesture recognizer
-        let gesture = {
-            let mut gesture_proc = self.gesture_proc.lock();
-            gesture_proc.process(phase, id, touch_pos)
-        };
-        d!("Touch generated gesture: {gesture:?}");
-
-        if let Some(gesture) = gesture {
-            if self.handle_gesture(gesture).await {
-                // Gesture was handled, stop propagation
-                return
-            }
-        }
-
-        // Fallback to raw touch event (backwards compat)
-        for child in self.get_children() {
-            let obj = get_ui_object3(&child);
-            if obj.handle_touch(phase, id, touch_pos).await {
-                return
-            }
-        }
+    /// The window-level gesture session.
+    pub fn gesture_session(&self) -> &GestureSessionPtr {
+        &self.gesture_session
     }
 
-    pub fn handle_touch_sync(
-        &self,
-        renderer: &RendererSync,
-        phase: TouchPhase,
-        id: u64,
-        mut touch_pos: Point,
-    ) -> bool {
+    /// Feed a touch (screen coordinates) into gesture recognition.
+    /// Recognition observes every touch regardless of which widget
+    /// handles it downstream.
+    pub fn feed_gesture(&self, phase: TouchPhase, id: u64, mut touch_pos: Point) {
         self.local_scale(&mut touch_pos);
-        for child in self.get_children() {
-            let obj = get_ui_object3(&child);
-            if obj.handle_touch_sync(renderer, phase, id, touch_pos) {
-                return true
-            }
-        }
-        false
-    }
-
-    async fn handle_gesture(&self, gesture: GestureAction) -> bool {
-        for child in self.get_children() {
-            let obj = get_ui_object3(&child);
-            if obj.handle_gesture(gesture.clone()).await {
-                return true
-            }
-        }
-        false
+        self.gesture_session.touch_event(phase, id, touch_pos);
     }
 
     #[instrument(target = "ui::win")]
@@ -534,7 +536,7 @@ impl Window {
         draw_calls.push((0, dc));
         //t!("  => {:?}", draw_calls);
 
-        self.renderer.replace_draw_calls(Some(atom.batch_id), draw_calls);
+        self.renderer.replace_draw_calls(draw_calls);
     }
 
     async fn reload_locale(&self, atom: &mut PropertyAtomicGuard) {

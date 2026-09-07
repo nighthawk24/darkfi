@@ -16,8 +16,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use sled_overlay::sled;
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[repr(u8)]
@@ -116,8 +114,8 @@ pub enum Error {
     #[error("Unexpected token found")]
     UnexpectedToken = 38,
 
-    #[error("Sled database error")]
-    SledDbErr = 39,
+    #[error("Key-value database error")]
+    KvdbErr = 39,
 
     #[error("Service failed")]
     ServiceFailed = 40,
@@ -139,10 +137,37 @@ pub enum Error {
 
     #[error("Unknown anim ID")]
     GfxUnknownAnimID = 46,
+
+    #[error("Contact not found")]
+    ContactNotFound = 47,
+
+    #[error("Serialization error")]
+    SerialErr = 48,
+
+    #[error("SQL database error")]
+    TursoErr = 49,
+
+    #[error("Unsupported node type")]
+    UnsupportedNodeType = 50,
+
+    #[error("Node not removable")]
+    NodeNotRemovable = 51,
 }
 
-impl From<sled::Error> for Error {
-    fn from(_: sled::Error) -> Error {
-        Error::SledDbErr
+impl From<kvdb_overlay::Error> for Error {
+    fn from(_: kvdb_overlay::Error) -> Error {
+        Error::KvdbErr
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(_: std::io::Error) -> Error {
+        Error::SerialErr
+    }
+}
+
+impl From<turso::Error> for Error {
+    fn from(_: turso::Error) -> Error {
+        Error::TursoErr
     }
 }

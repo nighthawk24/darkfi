@@ -103,7 +103,9 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     tx_status_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     tx_status_layer.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
-    let tx_status_layer = tx_status_layer.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let tx_status_layer = tx_status_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     wallet_layer.link(tx_status_layer.clone());
     let tx_status_is_visible =
         PropertyBool::wrap(&tx_status_layer, Role::App, "is_visible", 0).unwrap();
@@ -138,13 +140,29 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     tx_status_layer.link(node);
 
     y += PADDING_Y * 2. + BASE_FONTSIZE + 1.;
 
-    create_separator(&app.renderer, atom, &tx_status_layer, "tx_status_separator", &mut y).await;
+    create_separator(
+        &app.renderer,
+        &app.redraw_trigger,
+        atom,
+        &tx_status_layer,
+        "tx_status_separator",
+        &mut y,
+    )
+    .await;
 
     // Transaction info text: "Sending {amount} {token_symbol} to {recipient_address}"
     let node = create_text("tx_info");
@@ -172,12 +190,27 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     tx_status_layer.link(node);
 
-    let sep =
-        create_separator(&app.renderer, atom, &tx_status_layer, "tx_info_separator", &mut 0.).await;
+    let sep = create_separator(
+        &app.renderer,
+        &app.redraw_trigger,
+        atom,
+        &tx_status_layer,
+        "tx_info_separator",
+        &mut 0.,
+    )
+    .await;
     let prop = sep.get_property("rect").unwrap();
     let code = cc.compile(format!("{y} + PADDING_Y * 2 + info_height + 1")).unwrap();
     prop.set_expr(atom, Role::App, 1, code).unwrap();
@@ -211,7 +244,15 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 3, 0.45).unwrap();
     hint_node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let hint_node = hint_node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     tx_status_layer.link(hint_node.clone());
 
@@ -240,14 +281,14 @@ pub async fn make(
     .await;
 
     let main_is_visible = PropertyBool::wrap(&main_layer, Role::App, "is_visible", 0).unwrap();
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let tx_status_is_visible1 = tx_status_is_visible.clone();
     let send_tx_data2 = send_tx_data.clone();
     let (slot, recvr) = Slot::new("tx_status_close_clicked");
     node.register("click", slot).unwrap();
     let listen_click = app.ex.spawn(async move {
         while let Ok(_) = recvr.recv().await {
-            let atom = &mut renderer.make_guard(gfxtag!("tx status close button"));
+            let atom = &mut redraw.make_guard(gfxtag!("tx status close button"));
             tx_status_is_visible1.set(atom, false);
             main_is_visible.set(atom, true);
 
@@ -263,10 +304,10 @@ pub async fn make(
     let set_tx_status_sub = tx_status_layer.subscribe_method_call("set_tx_status").unwrap();
     let tx_status_layer_clone = tx_status_layer.clone();
     let sg_root = app.sg_root.clone();
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     app.tasks.lock().unwrap().push(app.ex.spawn(async move {
         while let Ok(mcall) = set_tx_status_sub.receive().await {
-            let atom = &mut renderer.make_guard(gfxtag!("set_tx_status"));
+            let atom = &mut redraw.make_guard(gfxtag!("set_tx_status"));
 
             let mut cur = std::io::Cursor::new(mcall.data);
             let tx_id = Option::<String>::decode(&mut cur).unwrap();

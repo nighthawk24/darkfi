@@ -22,7 +22,7 @@ use darkfi_serial::{Decodable, Encodable};
 
 use crate::{
     app::{
-        node::{create_button, create_layer, create_text, create_vector_art},
+        node::{create_layer, create_text},
         schema::COLOR_SCHEME,
         App,
     },
@@ -30,8 +30,7 @@ use crate::{
     gfx::gfxtag,
     prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, Role},
     scene::{SceneNodePtr, Slot},
-    shape,
-    ui::{Button, Layer, Text, VectorArt},
+    ui::{Layer, Text},
     util::i18n::I18nBabelFish,
 };
 
@@ -43,7 +42,6 @@ pub async fn make(
     i18n_fish: &I18nBabelFish,
     window_scale: PropertyFloat32,
     send_tx_data: Arc<std::sync::Mutex<SendTxData>>,
-    step3_is_visible: PropertyBool,
 ) -> SceneNodePtr {
     let atom = &mut PropertyAtomicGuard::none();
 
@@ -70,7 +68,9 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     send_step4_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     send_step4_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let send_step4_layer = send_step4_layer.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let send_step4_layer = send_step4_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     wallet_layer.link(send_step4_layer.clone());
     let step4_is_visible =
         PropertyBool::wrap(&send_step4_layer, Role::App, "is_visible", 0).unwrap();
@@ -78,44 +78,7 @@ pub async fn make(
     create_bg_mesh(app, atom, &send_step4_layer, "send_bg4").await;
     create_header_bg(app, atom, &send_step4_layer, "send_header_bg4").await;
 
-    // Back button
-    let node = create_vector_art("send_back_btn_bg4");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, BACKARROW_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, BACKARROW_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let shape = shape::create_back_arrow().scaled(BACKARROW_SCALE);
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
-    send_step4_layer.link(node);
-
     let mut y = 0.;
-
-    let node = create_button("send_back_btn4");
-    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, y).unwrap();
-    prop.set_f32(atom, Role::App, 2, WALLET_BTN_SIZE * 2.).unwrap();
-    prop.set_f32(atom, Role::App, 3, HEADER_HEIGHT).unwrap();
-
-    let step3_is_visible2 = step3_is_visible.clone();
-    let step4_is_visible1 = step4_is_visible.clone();
-    let renderer = app.renderer.clone();
-    let (slot, recvr) = Slot::new("send_back_clicked4");
-    node.register("click", slot).unwrap();
-    let listen_click = app.ex.spawn(async move {
-        while let Ok(_) = recvr.recv().await {
-            let atom = &mut renderer.make_guard(gfxtag!("send step4 back button"));
-            step4_is_visible1.set(atom, false);
-            step3_is_visible2.set(atom, true);
-        }
-    });
-    app.tasks.lock().unwrap().push(listen_click);
-
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
-    send_step4_layer.link(node);
 
     y += HEADER_HEIGHT;
 
@@ -144,7 +107,15 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step4_layer.link(node);
 
@@ -170,13 +141,29 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step4_layer.link(node);
 
     y += PADDING_Y * 2. + BASE_FONTSIZE + 1.;
 
-    create_separator(&app.renderer, atom, &send_step4_layer, "send_token_separator4", &mut y).await;
+    create_separator(
+        &app.renderer,
+        &app.redraw_trigger,
+        atom,
+        &send_step4_layer,
+        "send_token_separator4",
+        &mut y,
+    )
+    .await;
 
     // Recipient label
     let node = create_text("send_recipient_label4");
@@ -201,7 +188,15 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step4_layer.link(node);
 
@@ -233,7 +228,15 @@ pub async fn make(
     }
     recipient_addr_node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let recipient_addr_node = recipient_addr_node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step4_layer.link(recipient_addr_node.clone());
 
@@ -242,6 +245,7 @@ pub async fn make(
     let y2 = format!("{y} + (PADDING_Y * 2. + addr_height) + 1");
     let node = create_separator(
         &app.renderer,
+        &app.redraw_trigger,
         atom,
         &send_step4_layer,
         "send_amount_label_separator4",
@@ -265,7 +269,9 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 3, AMOUNT_FONTSIZE).unwrap();
     prop.add_depend(&addr_h_prop, 0, "addr_height");
     amount_wrapper.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let amount_wrapper = amount_wrapper.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let amount_wrapper = amount_wrapper
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     send_step4_layer.link(amount_wrapper.clone());
 
     // Amount text
@@ -284,7 +290,15 @@ pub async fn make(
     amount_text_node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     amount_text_node.set_property_str(atom, Role::App, "text", "0").unwrap();
     let amount_text_node = amount_text_node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     amount_wrapper.link(amount_text_node.clone());
 
@@ -312,7 +326,15 @@ pub async fn make(
     }
     token_symbol_node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let token_symbol_node = token_symbol_node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     amount_wrapper.link(token_symbol_node.clone());
 
@@ -334,7 +356,15 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 3, 0.).unwrap();
     tx_fee_label_node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let tx_fee_label_node = tx_fee_label_node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step4_layer.link(tx_fee_label_node.clone());
 
@@ -358,7 +388,15 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 2, 0.).unwrap();
     prop.set_f32(atom, Role::App, 3, 0.).unwrap();
     let tx_fee_value_node = tx_fee_value_node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     send_step4_layer.link(tx_fee_value_node.clone());
 
@@ -387,7 +425,7 @@ pub async fn make(
     )
     .await;
 
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let sg_root = app.sg_root.clone();
     let step4_is_visible1 = step4_is_visible.clone();
     let send_tx_data_for_send = send_tx_data.clone();
@@ -403,7 +441,7 @@ pub async fn make(
                     continue;
                 }
             }
-            let atom = &mut renderer.make_guard(gfxtag!("send button"));
+            let atom = &mut redraw.make_guard(gfxtag!("send button"));
 
             step4_is_visible1.set(atom, false);
             if let Some(tx_status) = sg_root.lookup_node("/window/content/wallet/tx_status_layer") {
@@ -446,7 +484,7 @@ pub async fn make(
 
     // Add listener for step4 visibility to update amount positions
     let step4_is_visible_clone = step4_is_visible.clone();
-    let renderer_clone = app.renderer.clone();
+    let redraw_clone = app.redraw_trigger.clone();
     let amount_wrapper_clone = amount_wrapper.clone();
     let amount_text_node_clone = amount_text_node.clone();
     let token_symbol_node_clone = token_symbol_node.clone();
@@ -466,7 +504,7 @@ pub async fn make(
                     }
                 }
 
-                let atom = &mut renderer_clone.make_guard(gfxtag!("update step4 amount positions"));
+                let atom = &mut redraw_clone.make_guard(gfxtag!("update step4 amount positions"));
                 let data = send_tx_data_clone2.lock().unwrap().clone();
 
                 let token_symbol = data.token_symbol.unwrap_or_else(|| "".to_string());

@@ -1,6 +1,12 @@
 import zmq
 from collections import namedtuple
-from . import serial, exc, expr
+from . import serial, exc
+
+class Expr(str):
+    """String rendering of an expr-bound property value, sent over netdebug.
+    Subclasses str so it formats naturally, but stays isinstance-distinct
+    from plain str property values."""
+    pass
 
 Property = namedtuple("Property", [
     "name",
@@ -64,9 +70,11 @@ class SceneNodeType:
     SHORTCUT = 17
     GESTURE = 18
     EMOJI_PICKER = 19
-    SETTING_ROOT = 20
     SETTING = 21
-    PLUGINS = 100
+    MENU = 22
+    TOKEN_TABLE = 23
+    TEXT_SCRAMBLE = 24
+    PLUGIN_ROOT = 100
     PLUGIN = 101
 
 class PropertyType:
@@ -76,9 +84,9 @@ class PropertyType:
     FLOAT32 = 3
     STR = 4
     ENUM = 5
-    BUFFER = 6
     SCENE_NODE_ID = 7
     SEXPR = 8
+    VECTOR_SHAPE = 9
 
     @staticmethod
     def to_str(prop_type):
@@ -95,30 +103,62 @@ class PropertyType:
                 return "str"
             case PropertyType.ENUM:
                 return "enum"
-            case PropertyType.BUFFER:
-                return "buffer"
             case PropertyType.SCENE_NODE_ID:
                 return "scene_node_id"
             case PropertyType.SEXPR:
                 return "sexpr"
+            case PropertyType.VECTOR_SHAPE:
+                return "vector_shape"
 
 class PropertySubType:
     NULL = 0
     COLOR = 1
     PIXEL = 2
     RESOURCE_ID = 3
+    LOCALE = 4
+    FLAG = 5
 
     @staticmethod
     def to_str(prop_type):
         match prop_type:
             case PropertySubType.NULL:
                 return "null"
-            case PropertySubType.Color:
+            case PropertySubType.COLOR:
                 return "color"
             case PropertySubType.PIXEL:
                 return "pixel"
             case PropertySubType.RESOURCE_ID:
                 return "resource_id"
+            case PropertySubType.LOCALE:
+                return "locale"
+            case PropertySubType.FLAG:
+                return "flag"
+
+class CallArgType:
+    UINT32 = 0
+    UINT64 = 1
+    FLOAT32 = 2
+    BOOL = 3
+    STR = 4
+    HASH = 5
+
+    @staticmethod
+    def to_str(arg_type):
+        match arg_type:
+            case CallArgType.UINT32:
+                return "uint32"
+            case CallArgType.UINT64:
+                return "uint64"
+            case CallArgType.FLOAT32:
+                return "float32"
+            case CallArgType.BOOL:
+                return "bool"
+            case CallArgType.STR:
+                return "str"
+            case CallArgType.HASH:
+                return "hash"
+            case _:
+                return "unknown"
 
 class PropertyStatus:
     OK = 0
@@ -134,7 +174,6 @@ class ErrorCode:
     PROPERTY_ALREADY_EXISTS = 5
     PROPERTY_NOT_FOUND = 6
     PROPERTY_WRONG_TYPE = 7
-    PROPERTY_WRONG_SUB_TYPE = 8
     PROPERTY_WRONG_LEN = 9
     PROPERTY_WRONG_INDEX = 10
     PROPERTY_OUT_OF_RANGE = 11
@@ -154,12 +193,24 @@ class ErrorCode:
     NODE_PARENT_NAME_CONFLICT = 25
     NODE_CHILD_NAME_CONFLICT = 26
     NODE_SIBLING_NAME_CONFLICT = 27
-    FILE_NOT_FOUND = 28
-    RESOURCE_NOT_FOUND = 29
-    PY_EVAL_ERR = 30
-    SEXPR_EMPTY = 31
     SEXPR_GLOBAL_NOT_FOUND = 32
+    PUBLISHER_DESTROYED = 34
     CHANNEL_CLOSED = 36
+    NODES_ARE_SAME = 37
+    UNEXPECTED_TOKEN = 38
+    KVDB_ERR = 39
+    SERVICE_FAILED = 40
+    GFX_DUPLICATE_TEXTURE_ID = 41
+    GFX_UNKNOWN_TEXTURE_ID = 42
+    GFX_DUPLICATE_BUFFER_ID = 43
+    GFX_UNKNOWN_BUFFER_ID = 44
+    GFX_DUPLICATE_ANIM_ID = 45
+    GFX_UNKNOWN_ANIM_ID = 46
+    CONTACT_NOT_FOUND = 47
+    SERIAL_ERR = 48
+    TURSO_ERR = 49
+    UNSUPPORTED_NODE_TYPE = 50
+    NODE_NOT_REMOVABLE = 51
 
     @staticmethod
     def to_str(errc):
@@ -216,134 +267,183 @@ class ErrorCode:
                 return "node_child_name_conflict"
             case ErrorCode.NODE_SIBLING_NAME_CONFLICT:
                 return "node_sibling_name_conflict"
-            case ErrorCode.FILE_NOT_FOUND:
-                return "file_not_found"
-            case ErrorCode.RESOURCE_NOT_FOUND:
-                return "resource_not_found"
-            case ErrorCode.PY_EVAL_ERR:
-                return "py_eval_err"
-            case ErrorCode.SEXPR_EMPTY:
-                return "sexpr_empty"
             case ErrorCode.SEXPR_GLOBAL_NOT_FOUND:
                 return "sexpr_global_not_found"
+            case ErrorCode.PUBLISHER_DESTROYED:
+                return "publisher_destroyed"
             case ErrorCode.CHANNEL_CLOSED:
                 return "channel_closed"
-
-def vertex(x, y, r, g, b, a, u, v):
-    buf = bytearray()
-    serial.write_f32(buf, x)
-    serial.write_f32(buf, y)
-    serial.write_f32(buf, r)
-    serial.write_f32(buf, g)
-    serial.write_f32(buf, b)
-    serial.write_f32(buf, a)
-    serial.write_f32(buf, u)
-    serial.write_f32(buf, v)
-    return buf
-
-def face(idx1, idx2, idx3):
-    buf = bytearray()
-    serial.write_u32(buf, idx1)
-    serial.write_u32(buf, idx2)
-    serial.write_u32(buf, idx3)
-    return buf
+            case ErrorCode.NODES_ARE_SAME:
+                return "nodes_are_same"
+            case ErrorCode.UNEXPECTED_TOKEN:
+                return "unexpected_token"
+            case ErrorCode.KVDB_ERR:
+                return "kvdb_err"
+            case ErrorCode.SERVICE_FAILED:
+                return "service_failed"
+            case ErrorCode.GFX_DUPLICATE_TEXTURE_ID:
+                return "gfx_duplicate_texture_id"
+            case ErrorCode.GFX_UNKNOWN_TEXTURE_ID:
+                return "gfx_unknown_texture_id"
+            case ErrorCode.GFX_DUPLICATE_BUFFER_ID:
+                return "gfx_duplicate_buffer_id"
+            case ErrorCode.GFX_UNKNOWN_BUFFER_ID:
+                return "gfx_unknown_buffer_id"
+            case ErrorCode.GFX_DUPLICATE_ANIM_ID:
+                return "gfx_duplicate_anim_id"
+            case ErrorCode.GFX_UNKNOWN_ANIM_ID:
+                return "gfx_unknown_anim_id"
+            case ErrorCode.CONTACT_NOT_FOUND:
+                return "contact_not_found"
+            case ErrorCode.SERIAL_ERR:
+                return "serial_err"
+            case ErrorCode.TURSO_ERR:
+                return "turso_err"
+            case ErrorCode.UNSUPPORTED_NODE_TYPE:
+                return "unsupported_node_type"
+            case ErrorCode.NODE_NOT_REMOVABLE:
+                return "node_not_removable"
+            case _:
+                return "unknown"
 
 class Api:
 
     def __init__(self, addr="127.0.0.1", port=9484):
-        context = zmq.Context()
-        self.socket = context.socket(zmq.REQ)
+        self.addr = addr
+        self.port = port
+        self.context = zmq.Context()
+        self.socket = self._make_socket()
+
+    def _make_socket(self):
+        socket = self.context.socket(zmq.REQ)
         #self.socket.setsockopt(zmq.IPV6, True)
-        self.socket.connect(f"tcp://{addr}:{port}")
+        # Fail fast with zmq.error.Again when no app is listening, so the
+        # CLI can report the endpoint it tried instead of hanging forever.
+        socket.setsockopt(zmq.RCVTIMEO, 3000)
+        # Discard undelivered messages at exit instead of blocking on
+        # context teardown when no app ever answered.
+        socket.setsockopt(zmq.LINGER, 0)
+        socket.connect(f"tcp://{self.addr}:{self.port}")
+        return socket
+
+    def _reset_socket(self):
+        # A REQ socket whose reply timed out is stuck mid-request and
+        # rejects further sends; replace it so later requests work.
+        try:
+            self.socket.close(linger=0)
+        except zmq.error.ZMQError:
+            pass
+        self.socket = self._make_socket()
 
     def _make_request(self, cmd, payload):
         req_cmd = bytearray()
         serial.write_u8(req_cmd, cmd)
-        self.socket.send_multipart([req_cmd, payload])
-
-        errc, reply = self.socket.recv_multipart()
+        try:
+            self.socket.send_multipart([req_cmd, payload])
+            errc, reply = self.socket.recv_multipart()
+        except zmq.error.ZMQError:
+            self._reset_socket()
+            raise
         errc = int.from_bytes(errc, "little")
         cursor = serial.Cursor(reply)
         match errc:
-            case 1:
+            case 0:
+                pass
+            case ErrorCode.INVALID_SCENE_PATH:
                 raise exc.InvalidScenePath
-            case 2:
+            case ErrorCode.NODE_NOT_FOUND:
                 raise exc.NodeNotFound
-            case 3:
+            case ErrorCode.CHILD_NODE_NOT_FOUND:
                 raise exc.ChildNodeNotFound
-            case 4:
+            case ErrorCode.PARENT_NODE_NOT_FOUND:
                 raise exc.ParentNodeNotFound
-            case 5:
+            case ErrorCode.PROPERTY_ALREADY_EXISTS:
                 raise exc.PropertyAlreadyExists
-            case 6:
+            case ErrorCode.PROPERTY_NOT_FOUND:
                 raise exc.PropertyNotFound
-            case 7:
+            case ErrorCode.PROPERTY_WRONG_TYPE:
                 raise exc.PropertyWrongType
-            case 8:
-                raise exc.PropertyWrongSubType
-            case 9:
+            case ErrorCode.PROPERTY_WRONG_LEN:
                 raise exc.PropertyWrongLen
-            case 10:
+            case ErrorCode.PROPERTY_WRONG_INDEX:
                 raise exc.PropertyWrongIndex
-            case 11:
+            case ErrorCode.PROPERTY_OUT_OF_RANGE:
                 raise exc.PropertyOutOfRange
-            case 12:
+            case ErrorCode.PROPERTY_NULL_NOT_ALLOWED:
                 raise exc.PropertyNullNotAllowed
-            case 12:
+            case ErrorCode.PROPERTY_SEXPR_NOT_ALLOWED:
                 raise exc.PropertySExprNotAllowed
-            case 14:
+            case ErrorCode.PROPERTY_IS_BOUNDED:
                 raise exc.PropertyIsBounded
-            case 15:
+            case ErrorCode.PROPERTY_WRONG_ENUM_ITEM:
                 raise exc.PropertyWrongEnumItem
-            case 16:
+            case ErrorCode.SIGNAL_ALREADY_EXISTS:
                 raise exc.SignalAlreadyExists
-            case 17:
+            case ErrorCode.SIGNAL_NOT_FOUND:
                 raise exc.SignalNotFound
-            case 18:
+            case ErrorCode.SLOT_NOT_FOUND:
                 raise exc.SlotNotFound
-            case 19:
+            case ErrorCode.METHOD_ALREADY_EXISTS:
                 raise exc.MethodAlreadyExists
-            case 20:
+            case ErrorCode.METHOD_NOT_FOUND:
                 raise exc.MethodNotFound
-            case 21:
+            case ErrorCode.NODES_ARE_LINKED:
                 raise exc.NodesAreLinked
-            case 22:
+            case ErrorCode.NODES_NOT_LINKED:
                 raise exc.NodesNotLinked
-            case 23:
+            case ErrorCode.NODE_HAS_PARENTS:
                 raise exc.NodeHasParents
-            case 24:
+            case ErrorCode.NODE_HAS_CHILDREN:
                 raise exc.NodeHasChildren
-            case 25:
+            case ErrorCode.NODE_PARENT_NAME_CONFLICT:
                 raise exc.NodeParentNameConflict
-            case 26:
+            case ErrorCode.NODE_CHILD_NAME_CONFLICT:
                 raise exc.NodeChildNameConflict
-            case 27:
+            case ErrorCode.NODE_SIBLING_NAME_CONFLICT:
                 raise exc.NodeSiblingNameConflict
-            case 28:
-                raise exc.FileNotFound
-            case 29:
-                raise exc.ResourceNotFound
-            case 30:
-                raise exc.PyEvalErr
-            case 31:
-                raise exc.SExprEmpty
-            case 32:
+            case ErrorCode.SEXPR_GLOBAL_NOT_FOUND:
                 raise exc.SExprGlobalNotFound
-            case 36:
+            case ErrorCode.PUBLISHER_DESTROYED:
+                raise exc.PublisherDestroyed
+            case ErrorCode.CHANNEL_CLOSED:
                 raise exc.ChannelClosed
+            case ErrorCode.NODES_ARE_SAME:
+                raise exc.NodesAreSame
+            case ErrorCode.UNEXPECTED_TOKEN:
+                raise exc.UnexpectedToken
+            case ErrorCode.KVDB_ERR:
+                raise exc.KvdbErr
+            case ErrorCode.SERVICE_FAILED:
+                raise exc.ServiceFailed
+            case ErrorCode.GFX_DUPLICATE_TEXTURE_ID:
+                raise exc.GfxDuplicateTextureID
+            case ErrorCode.GFX_UNKNOWN_TEXTURE_ID:
+                raise exc.GfxUnknownTextureID
+            case ErrorCode.GFX_DUPLICATE_BUFFER_ID:
+                raise exc.GfxDuplicateBufferID
+            case ErrorCode.GFX_UNKNOWN_BUFFER_ID:
+                raise exc.GfxUnknownBufferID
+            case ErrorCode.GFX_DUPLICATE_ANIM_ID:
+                raise exc.GfxDuplicateAnimID
+            case ErrorCode.GFX_UNKNOWN_ANIM_ID:
+                raise exc.GfxUnknownAnimID
+            case ErrorCode.CONTACT_NOT_FOUND:
+                raise exc.ContactNotFound
+            case ErrorCode.SERIAL_ERR:
+                raise exc.SerialErr
+            case ErrorCode.TURSO_ERR:
+                raise exc.TursoErr
+            case ErrorCode.UNSUPPORTED_NODE_TYPE:
+                raise exc.UnsupportedNodeType
+            case ErrorCode.NODE_NOT_REMOVABLE:
+                raise exc.NodeNotRemovable
+            case _:
+                raise exc.UnknownError(f"unknown error code: {errc}")
         return cursor
 
     def hello(self):
         response = self._make_request(Command.HELLO, bytearray())
         return serial.decode_str(response)
-
-    def get_info(self, node_id):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        cur = self._make_request(Command.GET_INFO, req)
-        name = serial.decode_str(cur)
-        type = serial.read_u8(cur)
-        return (name, type)
 
     def get_children(self, node_path):
         req = bytearray()
@@ -357,19 +457,6 @@ class Api:
             child_type = serial.read_u8(cur)
             children.append((child_name, child_id, child_type))
         return children
-
-    def get_parents(self, node_id):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        cur = self._make_request(Command.GET_PARENTS, req)
-        parents_len = serial.decode_varint(cur)
-        parents = []
-        for _ in range(parents_len):
-            parent_name = serial.decode_str(cur)
-            parent_id = serial.read_u32(cur)
-            parent_type = serial.read_u8(cur)
-            parents.append((parent_name, parent_id, parent_type))
-        return parents
 
     def get_properties(self, node_path):
         req = bytearray()
@@ -436,14 +523,15 @@ class Api:
                 return serial.decode_str(cur)
             case PropertyType.ENUM:
                 return serial.decode_str(cur)
-            case PropertyType.BUFFER:
-                pass
             case PropertyType.SCENE_NODE_ID:
                 return serial.read_u32(cur)
+            case PropertyType.VECTOR_SHAPE:
+                # Shapes carry no payload on the get path
+                return "<...>"
             case _:
                 raise Exception("unknown property type returned")
 
-    def get_property_value(self, node_path, prop_name):
+    def get_property_value_full(self, node_path, prop_name):
         req = bytearray()
         serial.encode_str(req, node_path)
         serial.encode_str(req, prop_name)
@@ -454,116 +542,31 @@ class Api:
             prop_status = serial.read_u8(cur)
             match prop_status:
                 case PropertyStatus.NULL:
-                    return None
+                    return (PropertyStatus.NULL, None)
                 case PropertyStatus.EXPR:
-                    return None
+                    return (PropertyStatus.EXPR, Expr(serial.decode_str(cur)))
                 case PropertyStatus.UNSET | PropertyStatus.OK:
-                    return Api.read_prop_val(cur, prop_type)
+                    return (prop_status, Api.read_prop_val(cur, prop_type))
 
-        vals = serial.decode_arr(cur, prop_read_fn)
-        return vals
+        return serial.decode_arr(cur, prop_read_fn)
 
-    def add_node(self, node_name, node_type):
+    def get_property_value(self, node_path, prop_name):
+        vals = self.get_property_value_full(node_path, prop_name)
+        return [val for (_, val) in vals]
+
+    def add_node(self, parent_path, name, node_type):
         req = bytearray()
-        serial.encode_str(req, node_name)
+        serial.encode_str(req, parent_path)
+        serial.encode_str(req, name)
         serial.write_u8(req, int(node_type))
         cur = self._make_request(Command.ADD_NODE, req)
         node_id = serial.read_u32(cur)
         return node_id
 
-    def remove_node(self, node_id):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        self._make_request(Command.REMOVE_NODE, req)
-
-    def rename_node(self, node_id, node_name):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        serial.encode_str(req, node_name)
-        self._make_request(Command.RENAME_NODE, req)
-
-    def scan_dangling(self):
-        cur = self._make_request(Command.SCAN_DANGLING, bytearray())
-        dangling_len = serial.decode_varint(cur)
-        dangling = []
-        for _ in range(dangling_len):
-            node_id = serial.read_u32(cur)
-            dangling.append(node_id)
-        return dangling
-
-    def lookup_node_id(self, node_path):
+    def remove_node(self, node_path):
         req = bytearray()
         serial.encode_str(req, node_path)
-        try:
-            cur = self._make_request(Command.LOOKUP_NODE_ID, req)
-        except exc.NodeNotFound:
-            return None
-        return serial.read_u32(cur)
-
-    def add_property(self, node_id, prop):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        serial.encode_str(req, prop.name)
-        serial.write_u8(req, int(prop.type))
-        serial.write_u8(req, int(prop.subtype))
-        serial.write_u32(req, int(prop.array_len))
-
-        def write_defaults(by):
-            assert prop.defaults is not None
-            defaults_len = len(prop.defaults)
-            serial.encode_varint(req, defaults_len)
-            for default in prop.defaults:
-                match prop.type:
-                    case PropertyType.UINT32:
-                        serial.write_u32(req, default)
-                    case PropertyType.FLOAT32:
-                        serial.write_f32(req, default)
-                    case PropertyType.STR:
-                        serial.encode_str(req, default)
-                    case _:
-                        raise exc.PropertyWrongType
-
-        serial.encode_opt(req, prop.defaults, write_defaults)
-
-        serial.encode_str(req, prop.ui_name)
-        serial.encode_str(req, prop.desc)
-        serial.write_u8(req, int(prop.is_null_allowed))
-        serial.write_u8(req, int(prop.is_expr_allowed))
-
-        def write_mxx(v, by):
-            assert v is not None
-            match prop.type:
-                case PropertyType.UINT32:
-                    serial.write_u32(req, v)
-                case PropertyType.FLOAT32:
-                    serial.write_f32(req, v)
-                case _:
-                    raise exc.PropertyWrongType
-
-        write_min = lambda by: write_mxx(prop.min_val, by)
-        write_max = lambda by: write_mxx(prop.max_val, by)
-
-        serial.encode_opt(req, prop.min_val, write_min)
-        serial.encode_opt(req, prop.max_val, write_max)
-
-        serial.encode_varint(req, len(prop.enum_items))
-        for enum_item in prop.enum_items:
-            if prop.type != PropertyType.ENUM:
-                raise exc.PropertyWrongType
-            serial.encode_str(req, enum_item)
-        self._make_request(Command.ADD_PROPERTY, req)
-
-    def link_node(self, child_id, parent_id):
-        req = bytearray()
-        serial.write_u32(req, child_id)
-        serial.write_u32(req, parent_id)
-        self._make_request(Command.LINK_NODE, req)
-
-    def unlink_node(self, child_id, parent_id):
-        req = bytearray()
-        serial.write_u32(req, child_id)
-        serial.write_u32(req, parent_id)
-        self._make_request(Command.UNLINK_NODE, req)
+        self._make_request(Command.REMOVE_NODE, req)
 
     def set_property_null(self, node_path, prop_name, i):
         req = bytearray()
@@ -618,24 +621,41 @@ class Api:
         serial.encode_str(req, val)
         self._make_request(Command.SET_PROPERTY_VALUE, req)
 
-    def set_property_buf(self, node_path, prop_name, i, buf):
+    def set_property_node_id(self, node_path, prop_name, i, val):
         req = bytearray()
         serial.encode_str(req, node_path)
         serial.encode_str(req, prop_name)
         serial.write_u32(req, i)
-        serial.write_u8(req, PropertyType.BUFFER)
-        serial.encode_buf(req, buf)
+        serial.write_u8(req, PropertyType.SCENE_NODE_ID)
+        serial.write_u32(req, val)
         self._make_request(Command.SET_PROPERTY_VALUE, req)
 
-    def set_property_expr(self, node_path, prop_name, i, code):
+    def set_property_expr(self, node_path, prop_name, i, expr_str):
         req = bytearray()
         serial.encode_str(req, node_path)
         serial.encode_str(req, prop_name)
         serial.write_u32(req, i)
         serial.write_u8(req, PropertyType.SEXPR)
-        serial.encode_varint(req, len(code))
-        for sexpr in code:
-            expr.encode_expr(req, sexpr)
+        serial.encode_str(req, expr_str)
+        self._make_request(Command.SET_PROPERTY_VALUE, req)
+
+    def set_property_shape(self, node_path, prop_name, i, verts, indices):
+        # verts: list of (x_expr, y_expr, [r, g, b, a]) tuples, where the
+        # coordinate exprs use the same source language as set_property_expr
+        req = bytearray()
+        serial.encode_str(req, node_path)
+        serial.encode_str(req, prop_name)
+        serial.write_u32(req, i)
+        serial.write_u8(req, PropertyType.VECTOR_SHAPE)
+        serial.encode_varint(req, len(verts))
+        for (x_expr, y_expr, color) in verts:
+            serial.encode_str(req, x_expr)
+            serial.encode_str(req, y_expr)
+            for c in color:
+                serial.write_f32(req, c)
+        serial.encode_varint(req, len(indices))
+        for index in indices:
+            serial.write_u16(req, index)
         self._make_request(Command.SET_PROPERTY_VALUE, req)
 
     def get_signals(self, node_path):
@@ -658,24 +678,6 @@ class Api:
         cur = self._make_request(Command.REGISTER_SLOT, req)
         slot_id = serial.read_u32(cur)
         return slot_id
-
-    def unregister_slot(self, node_id, sig_name, slot_id):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        serial.encode_str(req, sig_name)
-        serial.write_u32(req, slot_id)
-        self._make_request(Command.UNREGISTER_SLOT, req)
-
-    def lookup_slot_id(self, node_id, sig_name, slot_name):
-        req = bytearray()
-        serial.write_u32(req, node_id)
-        serial.encode_str(req, sig_name)
-        serial.encode_str(req, slot_name)
-        try:
-            cur = self._make_request(Command.LOOKUP_SLOT_ID, req)
-        except exc.RequestSlotNotFound:
-            return None
-        return serial.read_u32(cur)
 
     def get_slots(self, node_path, sig_name):
         req = bytearray()
@@ -716,7 +718,7 @@ class Api:
             return (arg_name, arg_desc, arg_type)
 
         args = serial.decode_arr(cur, read_arg)
-        results = serial.decode_arr(cur, read_arg)
+        results = serial.decode_opt(cur, lambda cur: serial.decode_arr(cur, read_arg))
 
         return (args, results)
 

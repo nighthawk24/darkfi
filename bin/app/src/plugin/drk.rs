@@ -25,6 +25,7 @@ use darkfi_money_contract::model::TokenId;
 use darkfi_sdk::crypto::keypair::{Address, Network, PublicKey, StandardAddress};
 use darkfi_serial::{serialize, Decodable, Encodable};
 use drk::{rpc::subscribe_blocks, Drk};
+use parking_lot::Mutex as SyncMutex;
 use smol::{channel::unbounded, lock::RwLock};
 use std::{
     io::Cursor,
@@ -34,12 +35,17 @@ use url::Url;
 
 use crate::{
     error::{Error, Result},
-    prop::BatchGuardPtr,
-    scene::{MethodCallSub, Pimpl, SceneNode, SceneNodePtr, SceneNodeType, SceneNodeWeak},
+    prop::{PropertyEnum, Role},
+    scene::{MethodCallSub, Pimpl, SceneNodePtr, SceneNodeWeak},
     ExecutorPtr,
 };
 
-const DARKFID_ENDPOINT: &str = "tcp://127.0.0.1:18345"; // TODO: should be configurable at runtime
+// TODO: should be configurable at runtime
+//const DARKFID_ENDPOINT: &str = "tcp://127.0.0.1:18345";
+/// Testnet endpoint from drk_config.toml
+const DARKFID_ENDPOINT_TCP: &str = "tcp://127.0.0.1:18345";
+/// TODO: replace with the real darkfid tor endpoint
+const DARKFID_ENDPOINT_TOR: &str = "tor://darkfid-tor-placeholder.onion:18345";
 const DARKFID_RETRY_TIME: u64 = 20;
 
 #[cfg(target_os = "android")]
@@ -120,26 +126,28 @@ pub struct DrkPlugin {
     sg_root: SceneNodePtr,
     tasks: OnceLock<Vec<smol::Task<()>>>,
     scan_progress_pub: PublisherPtr<(u32, u32)>,
+    net_transport: PropertyEnum,
 
     drk: Arc<RwLock<Drk>>,
     build_tx_channel: smol::channel::Sender<BuildTxRequest>,
+    last_balances: SyncMutex<Option<Vec<(String, TokenId, u64)>>>,
 }
 
 impl DrkPlugin {
     pub async fn new(node: SceneNodeWeak, sg_root: SceneNodePtr, ex: ExecutorPtr) -> Result<Pimpl> {
-        let node_ref = node.upgrade().unwrap();
+        let setting_node = sg_root.lookup_node("/setting").unwrap();
+        let net_transport =
+            PropertyEnum::wrap(&setting_node, Role::Internal, "net.transport", 0).unwrap();
 
-        let setting_root = Arc::new(SceneNode::new("setting", SceneNodeType::SettingRoot));
-        node_ref.link(setting_root.clone());
-
-        let endpoint = Url::parse(DARKFID_ENDPOINT).unwrap();
+        let endpoint = Url::parse(DARKFID_ENDPOINT_TCP).unwrap();
+        i!("Using {endpoint} transport for darkfid connection");
 
         let drk = match Drk::new(
             Network::Testnet,
             get_cache_path().to_string_lossy().to_string(),
             get_wallet_path().to_string_lossy().to_string(),
             "changeme".to_string(),
-            Some(endpoint),
+            Some(endpoint.clone()),
             &ex,
             false,
         )
@@ -205,6 +213,8 @@ impl DrkPlugin {
             drk: drk.into_ptr(),
             build_tx_channel: build_tx_tx,
             scan_progress_pub: Publisher::new(),
+            net_transport,
+            last_balances: SyncMutex::new(None),
         });
 
         // Start background task to process build_tx requests from channel
@@ -275,8 +285,19 @@ impl DrkPlugin {
         Ok(Pimpl::Drk(self_))
     }
 
-    async fn apply_settings(_self: Arc<Self>, _batch: BatchGuardPtr) {
-        // TODO
+    /// Endpoint for the darkfid daemon connection, derived from the
+    /// `net.transport` setting
+    fn endpoint(&self) -> Url {
+        // Disabled pending drk changes
+        /*
+        let endpoint = match self.net_transport.get().as_str() {
+            "tor" => DARKFID_ENDPOINT_TOR,
+            "tcp" => DARKFID_ENDPOINT_TCP,
+            unhandled => panic!("Unhandled net.transport value: {unhandled}"),
+        };
+        Url::parse(endpoint).unwrap()
+        */
+        Url::parse(DARKFID_ENDPOINT_TCP).unwrap()
     }
 
     pub async fn get_default_address(&self) -> Result<String> {
@@ -320,11 +341,34 @@ impl DrkPlugin {
         Ok(result)
     }
 
-    /// Emit balances_updated signal
+    /// Emit balances_updated signal with the balances encoded in the payload.
+    /// Only emits when the encoded balances differ from the last emitted ones.
     async fn emit_balances_updated(&self) {
-        if let Some(node) = self.node.upgrade() {
-            let _ = node.trigger("balances_updated", vec![]).await;
+        let Some(node) = self.node.upgrade() else { return };
+
+        let balances = match self.get_balances().await {
+            Ok(b) => b,
+            Err(e) => {
+                e!("Failed to get balances for balances_updated signal: {e}");
+                return
+            }
+        };
+
+        let mut data = vec![];
+        if let Err(e) = balances.encode(&mut data) {
+            e!("Failed to encode balances for balances_updated signal: {e}");
+            return
         }
+
+        let mut last = self.last_balances.lock();
+        if let Some(last) = &*last {
+            if *last == balances {
+                return
+            }
+        }
+        *last = Some(balances);
+
+        let _ = node.trigger("balances_updated", data).await;
     }
 
     /// Emit tx_updated signal
@@ -653,9 +697,7 @@ impl DrkPlugin {
     }
 
     async fn start(self: Arc<Self>, ex: ExecutorPtr, tasks: Vec<smol::Task<()>>) {
-        let endpoint = Url::parse(DARKFID_ENDPOINT).unwrap();
-
-        let self2 = self.clone();
+        let me2 = Arc::downgrade(&self);
         let drk = self.drk.clone();
         let (shell_sender, shell_receiver) = unbounded();
         let ex_ = ex.clone();
@@ -676,26 +718,41 @@ impl DrkPlugin {
                     }
                 };
                 let status: u8 = if progress > 0.5 { 2 } else { 1 };
-                if let Some(node) = self2.node.upgrade() {
-                    let _ = node.trigger("connect", serialize(&status)).await;
-                }
+                let Some(self2) = me2.upgrade() else { break };
+                let Some(node) = self2.node.upgrade() else { continue };
+                let start_height = first_height.unwrap();
+                let blocks_scanned = height - start_height;
+                let total_blocks = final_height - start_height;
+                let percentage = if total_blocks > 0 {
+                    (blocks_scanned as f32 / total_blocks as f32 * 100.0) as u32
+                } else {
+                    0
+                };
+                let desc = format!("{}/{} [{}%]", blocks_scanned, total_blocks, percentage);
+                let _ = node.trigger("connect", serialize(&(status, desc))).await;
             }
         });
 
-        let self2 = self.clone();
+        let me2 = Arc::downgrade(&self);
 
         // Task that handles the RPC subscription with retry logic
         let subscribe_task = ex.spawn(async move {
             loop {
+                let Some(self2) = me2.upgrade() else { break };
+                let endpoint = self2.endpoint();
                 i!("Attempting to connect to darkfid daemon at {}", endpoint);
                 let subscribe_rpc_task = StoppableTask::new();
                 let shell_sender = shell_sender.clone();
                 let drk = drk.clone();
-                let endpoint = endpoint.clone();
                 let ex = ex_.clone();
                 let progress_pub = self2.scan_progress_pub.clone();
 
-                let _ = self2.node.upgrade().unwrap().trigger("connect", serialize(&0u8)).await;
+                let _ = self2
+                    .node
+                    .upgrade()
+                    .unwrap()
+                    .trigger("connect", serialize(&(0u8, String::new())))
+                    .await;
 
                 if let Err(e) = drk
                     .read()
@@ -704,7 +761,12 @@ impl DrkPlugin {
                     .await
                 {
                     e!("Failed during drk scanning: {e}");
-                    let _ = self2.node.upgrade().unwrap().trigger("connect", serialize(&0u8)).await;
+                    let _ = self2
+                        .node
+                        .upgrade()
+                        .unwrap()
+                        .trigger("connect", serialize(&(0u8, String::new())))
+                        .await;
 
                     // Wait before retrying
                     i!("Retrying connection to darkfid in {} seconds...", DARKFID_RETRY_TIME);
@@ -712,7 +774,14 @@ impl DrkPlugin {
                     continue
                 }
 
-                let _ = self2.node.upgrade().unwrap().trigger("connect", serialize(&3u8)).await;
+                let _ = self2
+                    .node
+                    .upgrade()
+                    .unwrap()
+                    .trigger("connect", serialize(&(3u8, String::new())))
+                    .await;
+
+                self2.emit_balances_updated().await;
 
                 match subscribe_blocks(
                     &drk,
@@ -731,7 +800,12 @@ impl DrkPlugin {
                     }
                 }
 
-                let _ = self2.node.upgrade().unwrap().trigger("connect", serialize(&0u8)).await;
+                let _ = self2
+                    .node
+                    .upgrade()
+                    .unwrap()
+                    .trigger("connect", serialize(&(0u8, String::new())))
+                    .await;
 
                 // Wait before retrying
                 i!("Retrying connection to darkfid in {} seconds...", DARKFID_RETRY_TIME);
@@ -739,9 +813,10 @@ impl DrkPlugin {
             }
         });
 
-        let self2 = self.clone();
+        let me2 = Arc::downgrade(&self);
         let subscribe_recv_task = ex.spawn(async move {
             loop {
+                let Some(self2) = me2.upgrade() else { break };
                 let recv = shell_receiver.recv().await;
 
                 if let Ok(lines) = recv {
@@ -753,6 +828,34 @@ impl DrkPlugin {
                 }
             }
         });
+
+        // NOTE: Disabled pending the drk scan_blocks upgrade. The current
+        // drk impl doesn't support restarting the rpc_task, but once we
+        // upgrade it, it will be trivial to fix in our custom loop.
+        //let net_transport = self.net_transport.clone();
+        //let net_transport_sub = net_transport.prop().subscribe_modify();
+        //let drk2 = self.drk.clone();
+        //let rpc_task_lock = self.rpc_task.clone();
+        //let ex_ = ex.clone();
+        //let transport_task = ex.spawn(async move {
+        //    while let Ok(_) = net_transport_sub.receive().await {
+        //        let transport = net_transport.get();
+        //        let endpoint = endpoint_for_transport(&transport);
+        //        i!("Transport changed to {transport}, restarting darkfid connection at {endpoint}");
+        //
+        //        {
+        //            let mut drk = drk2.write().await;
+        //            let _ = drk.stop_rpc_client().await;
+        //            drk.rpc_client = Some(RwLock::new(
+        //                DarkfidRpcClient::new(endpoint.clone(), ex_.clone()).await,
+        //            ));
+        //        }
+        //
+        //        if let Some(rpc_task) = &*rpc_task_lock.read().await {
+        //            rpc_task.stop().await;
+        //        }
+        //    }
+        //});
 
         let mut all_tasks = vec![scan_progress_task, subscribe_task, subscribe_recv_task];
         all_tasks.extend(tasks);

@@ -22,13 +22,61 @@ use std::{io::Cursor, sync::Arc};
 use zeromq::{Socket, SocketRecv, SocketSend};
 
 use crate::{
+    app::node::{create_layer, create_vector_art},
     error::{Error, Result},
-    expr::SExprCode,
+    expr::{decompile, Compiler, MachineGlobals, SExprCode, SExprMachine, SExprVal},
     gfx::{gfxtag, Renderer},
     prop::{PropertyType, Role},
-    scene::{SceneNodeId, SceneNodePtr, ScenePath, Slot},
+    scene::{Pimpl, SceneNodeId, SceneNodePtr, SceneNodeType, ScenePath, Slot},
+    ui::{
+        get_ui_object3, get_ui_object_ptr, Layer, RedrawTrigger, ShapeVertex, VectorArt,
+        VectorShape,
+    },
     ExecutorPtr,
 };
+
+/// Stop the UI tasks and clear the buffers of a subtree about to be
+/// removed at runtime, mirroring Window::stop(). Only pimpl types with a
+/// UIObject mapping are touched; others (Window, Setting, plugins, Null)
+/// keep their tasks until process exit.
+fn stop_ui_subtree(node: &SceneNodePtr) {
+    if matches!(
+        node.pimpl(),
+        Pimpl::Layer(_) |
+            Pimpl::ScrollLayer(_) |
+            Pimpl::VectorArt(_) |
+            Pimpl::Text(_) |
+            Pimpl::TextScramble(_) |
+            Pimpl::Edit(_) |
+            Pimpl::Image(_) |
+            Pimpl::Video(_) |
+            Pimpl::Button(_) |
+            Pimpl::EmojiPicker(_) |
+            Pimpl::Shortcut(_) |
+            Pimpl::Menu(_) |
+            Pimpl::TokenTable(_)
+    ) {
+        get_ui_object3(node).stop();
+    }
+    for child in node.get_children() {
+        stop_ui_subtree(&child);
+    }
+}
+
+/// Run a freshly compiled expr on a throwaway machine so unknown
+/// variables (typos) reject the set request instead of failing silently
+/// on every eval afterwards. The dummy values are irrelevant; only name
+/// resolution matters and the globals are discarded. `global_names` are
+/// the variable names the property's real eval can provide.
+fn check_expr(code: &SExprCode, global_names: &[String]) -> Result<()> {
+    let mut globals: MachineGlobals = vec![];
+    for name in global_names {
+        globals.push((name.clone(), SExprVal::Float32(1.)));
+    }
+    let mut machine = SExprMachine { globals, stmts: code };
+    machine.call()?;
+    Ok(())
+}
 
 const USE_IPV6: bool = true;
 
@@ -79,6 +127,7 @@ pub struct ZeroMQAdapter {
     */
     sg_root: SceneNodePtr,
     renderer: Renderer,
+    redraw: RedrawTrigger,
     ex: ExecutorPtr,
 
     zmq_rep: Mutex<zeromq::RepSocket>,
@@ -86,7 +135,12 @@ pub struct ZeroMQAdapter {
 }
 
 impl ZeroMQAdapter {
-    pub async fn new(sg_root: SceneNodePtr, renderer: Renderer, ex: ExecutorPtr) -> Arc<Self> {
+    pub async fn new(
+        sg_root: SceneNodePtr,
+        renderer: Renderer,
+        redraw: RedrawTrigger,
+        ex: ExecutorPtr,
+    ) -> Arc<Self> {
         let mut zmq_rep = zeromq::RepSocket::new();
         if USE_IPV6 {
             zmq_rep.bind("tcp://[::]:9484").await.unwrap();
@@ -104,6 +158,7 @@ impl ZeroMQAdapter {
         Arc::new(Self {
             sg_root,
             renderer,
+            redraw,
             ex,
             zmq_rep: Mutex::new(zmq_rep),
             zmq_pub: Mutex::new(zmq_pub),
@@ -227,18 +282,38 @@ impl ZeroMQAdapter {
                 prop.typ.encode(&mut reply).unwrap();
                 VarInt(prop.get_len() as u64).encode(&mut reply).unwrap();
                 for i in 0..prop.get_len() {
-                    let val = prop.get_value(i)?;
-                    if val.is_unset() {
-                        1u8.encode(&mut reply).unwrap();
+                    // Check the raw stored value, since get_value() resolves
+                    // exprs to their cached/default value and would never
+                    // report the EXPR status.
+                    let val = prop.get_raw_value(i)?;
+                    if val.is_expr() {
+                        3u8.encode(&mut reply).unwrap();
+                        let expr = prop.get_expr(i)?;
+                        decompile(&expr).encode(&mut reply).unwrap();
+                    } else if val.is_unset() {
+                        // A null default encodes zero payload bytes, so it
+                        // is reported as the NULL status instead of UNSET.
+                        // This mirrors the old get_value() semantics, where
+                        // an unset index with a null default resolved to
+                        // null.
                         let default = &prop.defaults[i];
-                        default.encode(&mut reply).unwrap();
+                        if default.is_null() {
+                            2u8.encode(&mut reply).unwrap();
+                        } else {
+                            1u8.encode(&mut reply).unwrap();
+                            // Shapes are not serialized on the get path;
+                            // the python client shows a "<...>" placeholder.
+                            if prop.typ != PropertyType::VectorShape {
+                                default.encode(&mut reply).unwrap();
+                            }
+                        }
                     } else if val.is_null() {
                         2u8.encode(&mut reply).unwrap();
-                    } else if val.is_expr() {
-                        3u8.encode(&mut reply).unwrap();
                     } else {
                         0u8.encode(&mut reply).unwrap();
-                        val.encode(&mut reply).unwrap();
+                        if prop.typ != PropertyType::VectorShape {
+                            val.encode(&mut reply).unwrap();
+                        }
                     }
                 }
             }
@@ -252,8 +327,7 @@ impl ZeroMQAdapter {
                 let node = self.sg_root.lookup_node(node_path).ok_or(Error::NodeNotFound)?;
                 let prop = node.get_property(&prop_name).ok_or(Error::PropertyNotFound)?;
 
-                let atom =
-                    &mut self.renderer.make_guard(gfxtag!("ZeroMQAdapter::SetPropertyValue"));
+                let atom = &mut self.redraw.make_guard(gfxtag!("ZeroMQAdapter::SetPropertyValue"));
 
                 match prop_type {
                     PropertyType::Null => {
@@ -284,28 +358,134 @@ impl ZeroMQAdapter {
                         prop.set_node_id(atom, Role::User, prop_i, val)?;
                     }
                     PropertyType::SExpr => {
-                        let val = SExprCode::decode(&mut cur).unwrap();
-                        debug!(target: "req", "  received code {:?}", val);
-                        prop.set_expr(atom, Role::User, prop_i, val)?;
+                        // Exprs are sent as source strings and compiled here.
+                        // The netdebug compiler is const-free: only machine
+                        // globals (w, h, ...) are available as variables.
+                        let expr_str = String::decode(&mut cur).unwrap();
+                        debug!(target: "req", "  compiling expr \"{expr_str}\"");
+                        let code = Compiler::new().compile(&expr_str)?;
+                        // The property's eval site provides its depends
+                        // names plus one of the machine global sets in
+                        // use (w, h for most rects, parent_*/rect_* for
+                        // edit behaves), so accept the union and treat
+                        // anything else as a typo.
+                        let mut names: Vec<String> =
+                            prop.get_depends().into_iter().map(|d| d.local_name).collect();
+                        names.extend(
+                            ["w", "h", "parent_w", "parent_h", "rect_w", "rect_h"]
+                                .iter()
+                                .map(|s| s.to_string()),
+                        );
+                        check_expr(&code, &names)?;
+                        prop.set_expr(atom, Role::User, prop_i, code)?;
+                    }
+                    PropertyType::VectorShape => {
+                        // Vertices carry coordinate exprs as source strings,
+                        // compiled with the same const-free compiler. The
+                        // payload is: vert count varint; per vert: x expr
+                        // string, y expr string, 4x f32 color; index count
+                        // varint; u16 indices.
+                        let cc = Compiler::new();
+                        // Shape verts eval with only the w/h globals.
+                        let shape_globals: Vec<String> =
+                            ["w", "h"].iter().map(|s| s.to_string()).collect();
+                        let vert_count = VarInt::decode(&mut cur)?.0 as usize;
+                        let mut verts = vec![];
+                        for _ in 0..vert_count {
+                            let x_src = String::decode(&mut cur)?;
+                            let y_src = String::decode(&mut cur)?;
+                            let color = [
+                                f32::decode(&mut cur)?,
+                                f32::decode(&mut cur)?,
+                                f32::decode(&mut cur)?,
+                                f32::decode(&mut cur)?,
+                            ];
+                            let x = cc.compile(&x_src)?;
+                            let y = cc.compile(&y_src)?;
+                            check_expr(&x, &shape_globals)?;
+                            check_expr(&y, &shape_globals)?;
+                            verts.push(ShapeVertex::new(x, y, color));
+                        }
+                        let index_count = VarInt::decode(&mut cur)?.0 as usize;
+                        let mut indices = vec![];
+                        for _ in 0..index_count {
+                            let index = u16::decode(&mut cur)?;
+                            if index as usize >= verts.len() {
+                                return Err(Error::PropertyWrongIndex)
+                            }
+                            indices.push(index);
+                        }
+                        let shape = VectorShape { verts, indices };
+                        prop.set_shape(atom, Role::User, prop_i, shape)?;
                     }
                 }
             }
             Command::AddNode => {
-                /*
-                let node_name = String::decode(&mut cur).unwrap();
-                let node_type = SceneNodeType::decode(&mut cur).unwrap();
-                debug!(target: "req", "{:?}({}, {:?})", cmd, node_name, node_type);
+                let parent_path: ScenePath = String::decode(&mut cur)?.parse()?;
+                let node_name = String::decode(&mut cur)?;
+                let node_type = SceneNodeType::decode(&mut cur)?;
+                debug!(target: "req", "{cmd:?}({parent_path}, {node_name}, {node_type:?})");
 
-                let node_id = scene_graph.add_node(&node_name, node_type).id;
-                node_id.encode(&mut reply).unwrap();
-                */
+                let parent = self.sg_root.lookup_node(parent_path).ok_or(Error::NodeNotFound)?;
+
+                if parent.get_children().iter().any(|c| c.name == node_name) {
+                    return Err(Error::NodeSiblingNameConflict)
+                }
+
+                let renderer = self.renderer.clone();
+                let redraw = self.redraw.clone();
+                let node = match node_type {
+                    SceneNodeType::Layer => {
+                        create_layer(&node_name)
+                            .setup(|me| Layer::new(me, renderer.clone(), redraw.clone()))
+                            .await
+                    }
+                    SceneNodeType::VectorArt => {
+                        create_vector_art(&node_name)
+                            .setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone()))
+                            .await
+                    }
+                    _ => return Err(Error::UnsupportedNodeType),
+                };
+
+                // Hold the guard over the link so the triggered pass sees
+                // the attached node.
+                let _atom = self.redraw.make_guard(gfxtag!("ZeroMQAdapter::AddNode"));
+                parent.link(node.clone());
+                node.id.encode(&mut reply).unwrap();
+
+                // Arm the pimpl's OnModify handlers (redraw on property
+                // change) exactly like window-owned nodes. The task keeps a
+                // strong ref so an immediate RemoveNode cannot drop the node
+                // out from under start().
+                let node2 = node.clone();
+                let ex2 = self.ex.clone();
+                self.ex
+                    .spawn(async move {
+                        let obj = get_ui_object_ptr(&node2);
+                        obj.start(ex2).await
+                    })
+                    .detach();
             }
             Command::RemoveNode => {
-                /*
-                let node_id = SceneNodeId::decode(&mut cur).unwrap();
-                debug!(target: "req", "{:?}({})", cmd, node_id);
-                scene_graph.remove_node(node_id)?;
-                */
+                let node_path: ScenePath = String::decode(&mut cur)?.parse()?;
+                debug!(target: "req", "{cmd:?}({node_path})");
+
+                let node = self.sg_root.lookup_node(node_path).ok_or(Error::NodeNotFound)?;
+
+                // The scene root has no parent, removal is meaningless.
+                if Arc::ptr_eq(&node, &self.sg_root) {
+                    return Err(Error::NodeNotRemovable)
+                }
+
+                // Tear down the subtree's UI tasks and buffers before
+                // unlinking, mirroring Window::stop(). Pimpl types without
+                // a UIObject mapping (Window, Setting, plugins, ...) keep
+                // their tasks until process exit.
+                stop_ui_subtree(&node);
+
+                node.unlink();
+                self.redraw.trigger();
             }
             Command::RenameNode => {
                 /*

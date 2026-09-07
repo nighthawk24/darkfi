@@ -21,7 +21,7 @@ use atomic_float::AtomicF32;
 use darkfi::system::msleep;
 use darkfi_serial::Decodable;
 use futures::FutureExt;
-use miniquad::{KeyCode, KeyMods, MouseButton, TouchPhase};
+use miniquad::{KeyCode, KeyMods, MouseButton};
 use parking_lot::Mutex as SyncMutex;
 use rand::{rngs::OsRng, Rng};
 use std::{
@@ -35,20 +35,20 @@ use std::{
 use tracing::instrument;
 
 #[cfg(target_os = "android")]
-use crate::android::textinput::AndroidTextInputState;
+use crate::android::{is_ime_visible, textinput::AndroidTextInputState};
 use crate::{
-    clipboard,
     gfx::{
         anim::Frame as AnimFrame, gfxtag, DrawCall, DrawInstruction, DrawMesh, ManagedSeqAnimPtr,
-        Point, Rectangle, RenderApi, Renderer, RendererSync, Vertex,
+        Point, Rectangle, RenderApi, Renderer, Vertex,
     },
     mesh::MeshBuilder,
     prop::{
-        BatchGuardId, BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyColor,
-        PropertyFloat32, PropertyPtr, PropertyRect, PropertyStr, PropertyUint32, Role,
+        BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyColor, PropertyFloat32,
+        PropertyPtr, PropertyRect, PropertyStr, PropertyUint32, Role,
     },
     scene::{MethodCallSub, Pimpl, SceneNodePtr, SceneNodeWeak},
     text::{self, Editor},
+    util::clipboard,
     ExecutorPtr,
 };
 
@@ -56,21 +56,19 @@ const ACTION_COPY: u32 = 0;
 const ACTION_PASTE: u32 = 1;
 const ACTION_SELALL: u32 = 2;
 
-use super::{DrawUpdate, OnModify, UIObject};
+use super::{DrawUpdate, GestureAction, GestureSet, OnModify, RedrawTrigger, UIObject};
 
 mod action;
 mod filter;
 use filter::{ALLOWED_KEYCODES, DISALLOWED_CHARS};
 mod behave;
 pub use behave::BaseEditType;
-use behave::{EditorBehavior, MultiLine, ScrollDir, SingleLine};
+use behave::{EditorBehavior, MultiLine, SingleLine};
 mod repeat;
 use repeat::{PressedKey, PressedKeysSmoothRepeat};
 
 /// The travel threshold on long hold select before activating select.
 const HOLD_TRAVEL_THRESHOLD_SQ: f32 = 100.;
-/// How long to hold before select is enabled in ms.
-const HOLD_ENABLE_TIME: u128 = 500;
 
 /// Minimum dist to update scroll when finger scrolling.
 /// Avoid updating too much makes scrolling smoother.
@@ -84,66 +82,52 @@ const SELECT_SCROLL_TRAVEL_SPEED: f32 = 1.;
 macro_rules! d { ($($arg:tt)*) => { debug!(target: "ui::edit", $($arg)*); } }
 macro_rules! t { ($($arg:tt)*) => { trace!(target: "ui::edit", $($arg)*); } }
 
-#[derive(Debug, Clone)]
-enum TouchStateAction {
-    Inactive,
-    Started { pos: Point, instant: std::time::Instant },
-    StartSelect,
-    Select,
-    DragSelectHandle { side: isize },
-    ScrollVert { start_pos: Point, scroll_start: f32 },
-    SetCursorPos,
-}
+/// Master switch for verbose edit/IME debugging.
+/// When true, detailed diagnostics about text content, selection range,
+/// compose region, focus state, and touch/keyboard events are emitted to
+/// the `ui::edit` log target. Set to false to silence them.
+const ENABLE_DEBUG: bool = true;
 
-struct TouchInfo {
-    state: TouchStateAction,
-    scroll: Arc<AtomicF32>,
-    scroll_ctrl: ScrollDir,
-}
-
-impl TouchInfo {
-    fn new(scroll: Arc<AtomicF32>, scroll_ctrl: ScrollDir) -> Self {
-        Self { state: TouchStateAction::Inactive, scroll, scroll_ctrl }
-    }
-
-    fn start(&mut self, pos: Point) {
-        debug!(target: "ui::chatedit::touch", "start touch: Started state");
-        self.state = TouchStateAction::Started { pos, instant: std::time::Instant::now() };
-    }
-
-    fn stop(&mut self) -> TouchStateAction {
-        debug!(target: "ui::chatedit::touch", "stop touch: Inactive state");
-        std::mem::replace(&mut self.state, TouchStateAction::Inactive)
-    }
-
-    fn update(&mut self, pos: &Point) {
-        match &self.state {
-            TouchStateAction::Started { pos: start_pos, instant } => {
-                let travel_dist_sq = pos.dist_sq(*start_pos);
-                let grad = (pos.y - start_pos.y) / (pos.x - start_pos.x);
-                let elapsed = instant.elapsed().as_millis();
-                //debug!(target: "ui::chatedit::touch", "TouchInfo::update() [travel_dist_sq={travel_dist_sq}, grad={grad}]");
-
-                if travel_dist_sq < HOLD_TRAVEL_THRESHOLD_SQ {
-                    if elapsed > HOLD_ENABLE_TIME {
-                        debug!(target: "ui::chatedit::touch", "update touch state: Started -> StartSelect");
-                        self.state = TouchStateAction::StartSelect;
-                    }
-                } else if self.scroll_ctrl.cmp(grad) {
-                    // Vertical movement
-                    debug!(target: "ui::chatedit::touch", "update touch state: Started -> ScrollVert");
-                    let scroll_start = self.scroll.load(Ordering::Relaxed);
-                    self.state =
-                        TouchStateAction::ScrollVert { start_pos: *start_pos, scroll_start };
-                } else {
-                    // Horizontal movement
-                    debug!(target: "ui::chatedit::touch", "update touch state: Started -> SetCursorPos");
-                    self.state = TouchStateAction::SetCursorPos;
-                }
-            }
-            _ => {}
+macro_rules! ed {
+    ($($arg:tt)*) => {
+        if ENABLE_DEBUG {
+            d!($($arg)*);
         }
-    }
+    };
+}
+
+/// What the touch armed at `Down`.
+#[derive(Debug, Clone)]
+enum TouchArm {
+    /// Nothing armed (no touch, or the action menu consumed the press)
+    Inactive,
+    /// The touch began inside the rect; drags may engage scrolling
+    Pressed,
+    /// A selection handle was grabbed; the precision drag adjusts the
+    /// selection endpoint from the first movement
+    Handle { side: isize },
+}
+
+/// What a `Pressed` touch's drag engaged as.
+#[derive(Debug, Clone)]
+enum DragMode {
+    /// Not yet engaged (movement below the travel threshold)
+    Undecided,
+    /// Content scrolling along the scroll direction
+    Scroll,
+    /// Off-direction movement; the cursor is set at release (no-op
+    /// while dragging, as before)
+    Cursor,
+}
+
+/// Gesture-touch state, armed at `Down` and driven by the drag
+/// lifecycle.
+struct TouchInfo {
+    arm: SyncMutex<TouchArm>,
+    /// The engaged drag mode for a `Pressed` touch
+    mode: SyncMutex<DragMode>,
+    /// Scroll-drag baseline: (touch pos at drag start, scroll then)
+    scroll_drag: SyncMutex<Option<(Point, f32)>>,
 }
 
 pub type BaseEditPtr = Arc<BaseEdit>;
@@ -154,6 +138,7 @@ pub struct BaseEdit {
     ex: ExecutorPtr,
     me: Weak<Self>,
     renderer: Renderer,
+    redraw: RedrawTrigger,
     key_repeat: SyncMutex<PressedKeysSmoothRepeat>,
 
     // Moves the draw cursor and applies scroll
@@ -164,7 +149,6 @@ pub struct BaseEdit {
     select_dc_key: u64,
     text_dc_key: u64,
     cursor_dc_key: u64,
-    cursor_mesh: SyncMutex<Option<DrawMesh>>,
     cursor_anim: SyncMutex<Option<ManagedSeqAnimPtr>>,
 
     is_active: PropertyBool,
@@ -205,15 +189,13 @@ pub struct BaseEdit {
     action_spacing: PropertyFloat32,
 
     mouse_btn_held: AtomicBool,
-    is_cursor_visible: AtomicBool,
-    is_blink_paused: AtomicBool,
     /// Used to explicitly hide the cursor. Must be manually re-enabled.
     hide_cursor: AtomicBool,
     /// Used to start select and scroll when mouse moves outside widget rect.
     sel_sender: SyncMutex<Option<async_channel::Sender<Option<(Point, Option<isize>)>>>>,
     scroll: Arc<AtomicF32>,
 
-    touch_info: SyncMutex<TouchInfo>,
+    touch_info: TouchInfo,
     is_phone_select: AtomicBool,
 
     parent_rect: Arc<SyncMutex<Option<Rectangle>>>,
@@ -230,6 +212,7 @@ impl BaseEdit {
         node: SceneNodeWeak,
         window_scale: PropertyFloat32,
         renderer: Renderer,
+        redraw: RedrawTrigger,
         edit_type: BaseEditType,
         ex: ExecutorPtr,
     ) -> Pimpl {
@@ -338,6 +321,7 @@ impl BaseEdit {
             ex,
             me: me.clone(),
             renderer,
+            redraw,
             key_repeat: SyncMutex::new(PressedKeysSmoothRepeat::new(400, 50)),
 
             root_dc_key: OsRng.gen(),
@@ -346,7 +330,6 @@ impl BaseEdit {
             select_dc_key: OsRng.gen(),
             text_dc_key: OsRng.gen(),
             cursor_dc_key: OsRng.gen(),
-            cursor_mesh: SyncMutex::new(None),
             cursor_anim: SyncMutex::new(None),
 
             is_active,
@@ -387,13 +370,15 @@ impl BaseEdit {
             action_spacing,
 
             mouse_btn_held: AtomicBool::new(false),
-            is_cursor_visible: AtomicBool::new(true),
-            is_blink_paused: AtomicBool::new(false),
             hide_cursor: AtomicBool::new(false),
             sel_sender: SyncMutex::new(None),
             scroll: scroll.clone(),
 
-            touch_info: SyncMutex::new(TouchInfo::new(scroll, behave.scroll_ctrl())),
+            touch_info: TouchInfo {
+                arm: SyncMutex::new(TouchArm::Inactive),
+                mode: SyncMutex::new(DragMode::Undecided),
+                scroll_drag: SyncMutex::new(None),
+            },
             is_phone_select: AtomicBool::new(false),
 
             parent_rect,
@@ -411,6 +396,41 @@ impl BaseEdit {
     #[inline]
     fn node(&self) -> SceneNodePtr {
         self.node.upgrade().unwrap()
+    }
+
+    /// Snapshot of the editor state useful for debugging editing bugs.
+    fn dbg_state(&self) -> String {
+        let focused = self.is_focused.get();
+        let active = self.is_active.get();
+        let phone_select = self.is_phone_select.load(Ordering::Relaxed);
+        let editor = self.editor.lock();
+        let selected = editor.selected_text();
+
+        #[cfg(target_os = "android")]
+        {
+            format!(
+                "text={:?} select={:?} compose={:?} selected={:?} focused={} active={} phone_select={}",
+                editor.state.text,
+                editor.state.select,
+                editor.state.compose,
+                selected,
+                focused,
+                active,
+                phone_select,
+            )
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            format!(
+                "text={:?} selected={:?} focused={} active={} phone_select={}",
+                self.text.get(),
+                selected,
+                focused,
+                active,
+                phone_select,
+            )
+        }
     }
 
     /// Reset the horizontal scroll to 0.
@@ -498,18 +518,20 @@ impl BaseEdit {
         mesh.append(verts, indices);
     }
 
-    async fn change_focus(self: Arc<Self>, batch: BatchGuardPtr) {
+    async fn change_focus(self: Arc<Self>, _batch: BatchGuardPtr) {
         if !self.is_active.get() {
+            ed!("change_focus: not active, skipping");
             return
         }
+        ed!("change_focus: focused={} -> [{}]", self.is_focused.get(), self.dbg_state());
         t!("Focus changed");
 
-        let atom = &mut batch.spawn();
         // Cursor visibility will change so just redraw everything lol
-        self.redraw(atom);
+        self.redraw.trigger();
     }
 
     fn handle_shortcut(&self, key: char, mods: &KeyMods, atom: &mut PropertyAtomicGuard) -> bool {
+        ed!("handle_shortcut({key:?}, {mods:?}) before=[{}]", self.dbg_state());
         t!("handle_shortcut({:?}, {:?})", key, mods);
 
         #[cfg(not(target_os = "macos"))]
@@ -539,17 +561,16 @@ impl BaseEdit {
             'v' => {
                 if action_mod {
                     if let Some(txt) = clipboard::get() {
-                        self.editor.lock().insert(&txt, atom);
-                        // Maybe insert should call this?
-                        self.behave.apply_cursor_scroll();
+                        self.insert_text(&txt, atom);
                     }
                 }
             }
             _ => return false,
         }
 
-        self.eval_rect();
-        self.redraw(atom);
+        // Any edit invalidates the action menu's selection
+        self.action_mode.clear();
+        ed!("handle_shortcut: handled key={key:?} after=[{}]", self.dbg_state());
         true
     }
 
@@ -667,42 +688,62 @@ impl BaseEdit {
             }
         }
 
-        self.eval_rect();
         self.behave.apply_cursor_scroll();
         self.pause_blinking();
-        self.redraw(atom);
+        // Any edit invalidates the action menu's selection
+        self.action_mode.clear();
 
+        ed!("handle_key: handled {key:?} after=[{}]", self.dbg_state());
         true
+    }
+
+    /// Insert text programmatically at the selection. Inserting
+    /// collapses the selection, so any phone-style selection (and its
+    /// handles/action menu) must be finished too — the draw pass
+    /// asserts a non-collapsed selection while phone-select is
+    /// active. Keeps the cursor scrolled into view.
+    fn insert_text(&self, txt: &str, atom: &mut PropertyAtomicGuard) {
+        self.editor.lock().insert(txt, atom);
+        self.behave.apply_cursor_scroll();
+        self.finish_select(atom);
     }
 
     /// This will select the entire word rather than move the cursor to that location
     fn start_touch_select(&self, touch_pos: Point, atom: &mut PropertyAtomicGuard) {
-        t!("start_touch_select({touch_pos:?})");
+        ed!("start_touch_select({touch_pos:?}) before=[{}]", self.dbg_state());
 
         let mut editor = self.editor.lock();
         editor.select_word_at_point(touch_pos);
         editor.refresh();
 
         let seltext = editor.selected_text().unwrap();
-        d!("Selected {seltext:?} from {touch_pos:?}");
+        drop(editor);
         self.select_text.clone().set_str(atom, Role::Internal, 0, seltext).unwrap();
 
-        drop(editor);
-
-        // if start != end {
-        t!("is_phone_select = true");
         self.is_phone_select.store(true, Ordering::Relaxed);
         self.hide_cursor.store(true, Ordering::Relaxed);
-        // }
     }
 
-    fn handle_touch_start(&self, touch_pos: Point) -> bool {
-        t!("handle_touch_start({touch_pos:?})");
+    /// `Down` passthrough: arm the touch. Grabbing a selection handle
+    /// is a zero-threshold action; the action menu consumes the press;
+    /// otherwise the press waits for recognition.
+    fn gesture_down(&self, touch_pos: Point) -> bool {
+        ed!("gesture_down({touch_pos:?}) before=[{}]", self.dbg_state());
 
         let rect = self.rect.get();
         let local_pos = touch_pos - rect.pos();
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_touch_start_action"));
+        // Grabbing a select handle must keep the action menu visible: the
+        // user adjusts the selection, then taps Copy/Paste. Check the drag
+        // BEFORE interact(), which consumes the menu.
+        if let Some(side) = self.select_handle_at(touch_pos) {
+            *self.touch_info.arm.lock() = TouchArm::Handle { side };
+            *self.touch_info.mode.lock() = DragMode::Undecided;
+            ed!("gesture_down: grabbing select handle side={side}");
+            return true
+        }
+
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::gesture_down_action"));
         if let Some(action_id) = self.action_mode.interact(local_pos) {
             match action_id {
                 ACTION_COPY => {
@@ -712,9 +753,7 @@ impl BaseEdit {
                 }
                 ACTION_PASTE => {
                     if let Some(txt) = clipboard::get() {
-                        self.editor.lock().insert(&txt, atom);
-                        self.behave.apply_cursor_scroll();
-                        self.finish_select(atom);
+                        self.insert_text(&txt, atom);
                     }
                 }
                 ACTION_SELALL => {
@@ -727,44 +766,37 @@ impl BaseEdit {
                 _ => {}
             }
 
-            self.eval_rect();
-            self.redraw(atom);
             return true;
         } else {
-            self.action_mode.redraw(atom.batch_id);
+            // interact() already consumed the menu; the pass re-emits the
+            // (now empty) action overlay when the batch settles.
         }
 
         if !rect.contains(touch_pos) {
-            t!("rect!cont rect={rect:?}, touch_pos={touch_pos:?}");
+            ed!("gesture_down: outside rect={rect:?}, ignoring");
             return false
         }
 
-        if self.try_handle_drag(touch_pos) {
-            return true
-        }
-
-        let mut touch_info = self.touch_info.lock();
-        touch_info.start(touch_pos);
+        *self.touch_info.arm.lock() = TouchArm::Pressed;
+        *self.touch_info.mode.lock() = DragMode::Undecided;
+        ed!("gesture_down: touch started, waiting for move/end");
         true
     }
 
     fn get_select_handles(&self, editor: &Editor) -> Option<(Point, Point)> {
-        let layout = editor.layout();
-
-        let sel = editor.selection(1);
-        if sel.is_collapsed() {
+        let endpoints = editor.selection_endpoints();
+        if endpoints.is_none() {
             assert!(!self.is_phone_select.load(Ordering::Relaxed));
-            return None
         }
-
-        let first = Rectangle::from(sel.anchor().geometry(layout, 0.)).pos();
-        let last = Rectangle::from(sel.focus().geometry(layout, 0.)).pos();
-        Some((first, last))
+        endpoints
     }
 
-    fn try_handle_drag(&self, mut touch_pos: Point) -> bool {
+    /// Which selection handle (if any) is grabbable at `touch_pos`
+    /// (parent space). Non-mutating probe used for both arming and
+    /// gesture hit-testing.
+    fn select_handle_at(&self, mut touch_pos: Point) -> Option<isize> {
         let editor = self.editor.lock();
-        let Some((mut first, mut last)) = self.get_select_handles(&editor) else { return false };
+        let (mut first, mut last) = self.get_select_handles(&editor)?;
 
         self.abs_to_local(&mut touch_pos);
 
@@ -785,187 +817,253 @@ impl BaseEdit {
         let is_first = first_dist_sq <= TOUCH_RADIUS_SQ;
         let is_last = last_dist_sq <= TOUCH_RADIUS_SQ;
 
-        let mut side = 0;
-
         if is_first && is_last {
             // Are we closer to the first or last?
             // Break the tie
             if first_dist_sq < last_dist_sq {
-                side = -1;
+                Some(-1)
             } else {
-                side = 1;
+                Some(1)
             }
         } else if is_first {
-            side = -1;
+            Some(-1)
         } else if is_last {
-            side = 1;
+            Some(1)
+        } else {
+            None
         }
-
-        if side != 0 {
-            d!("start touch: DragSelectHandle state [side={side}]");
-            // Set touch_state status to enable begin dragging them
-            let mut touch_info = self.touch_info.lock();
-            touch_info.state = TouchStateAction::DragSelectHandle { side };
-            return true
-        }
-
-        false
     }
 
-    fn handle_touch_move(&self, renderer: &RendererSync, mut touch_pos: Point) -> bool {
+    /// Selection-handle drag: follow the finger with autoscroll when
+    /// it leaves the rect.
+    fn drag_select_handle(&self, touch_pos: Point, side: isize) {
+        // The IME can collapse the selection (finishing phone-select
+        // mode) while a handle drag is in progress. Abort the drag
+        // instead of asserting on the stale state.
+        if !self.is_phone_select.load(Ordering::Relaxed) {
+            ed!("drag_select_handle: phone select finished mid-drag, aborting");
+            *self.touch_info.arm.lock() = TouchArm::Inactive;
+            return
+        }
+
+        let rect = self.rect.get();
+        let is_touch_hover = rect.contains(touch_pos);
+
+        let sel_sender = self.sel_sender.lock().clone().unwrap();
+        // Finger outside rect?
+        // If so we gotta scroll it while selecting.
+        if !is_touch_hover {
+            // This process will begin selecting text and applying scroll too.
+            sel_sender.try_send(Some((touch_pos, Some(side)))).unwrap();
+        } else {
+            // Stop any existing select/scroll process
+            sel_sender.try_send(None).unwrap();
+            // Finger is inside so just select the text once and be done.
+            self.handle_select(touch_pos, Some(side));
+        }
+    }
+
+    /// `Pressed`-touch drag movement: engage scrolling once the travel
+    /// crosses the threshold along the scroll direction, mirroring the
+    /// old gradient check.
+    fn drag_pressed(&self, touch_pos: Point) {
+        let (mode, scroll_drag) = {
+            let mode = self.touch_info.mode.lock().clone();
+            let scroll_drag = *self.touch_info.scroll_drag.lock();
+            (mode, scroll_drag)
+        };
+
+        match mode {
+            DragMode::Undecided => {
+                let Some((start_pos, scroll_start)) = scroll_drag else { return };
+
+                let travel_dist_sq = touch_pos.dist_sq(start_pos);
+                if travel_dist_sq < HOLD_TRAVEL_THRESHOLD_SQ {
+                    return
+                }
+
+                let grad = (touch_pos.y - start_pos.y) / (touch_pos.x - start_pos.x);
+                if self.behave.scroll_ctrl().cmp(grad) {
+                    // Vertical movement engages content scrolling
+                    *self.touch_info.mode.lock() = DragMode::Scroll;
+                    *self.touch_info.scroll_drag.lock() = Some((start_pos, scroll_start));
+                } else {
+                    // Off-direction movement; cursor is set on release
+                    *self.touch_info.mode.lock() = DragMode::Cursor;
+                }
+            }
+            DragMode::Scroll => {
+                let Some((start_pos, scroll_start)) = scroll_drag else { return };
+
+                let travel_dist = self.behave.scroll_ctrl().travel(start_pos, touch_pos);
+                let mut scroll = scroll_start + travel_dist;
+                scroll = scroll.clamp(0., self.behave.max_scroll());
+                if (self.scroll.load(Ordering::Relaxed) - scroll).abs() < VERT_SCROLL_UPDATE_INC {
+                    return
+                }
+                self.scroll.store(scroll, Ordering::Release);
+                self.redraw.trigger();
+            }
+            DragMode::Cursor => {
+                // Off-direction movement: nothing while dragging; the
+                // cursor is positioned at release (see gesture_up).
+            }
+        }
+    }
+
+    /// `LongPress` resolved by the recognizer: select the word under
+    /// the finger and show the copy/paste action menu while the finger
+    /// is still down.
+    fn gesture_long_press(&self, touch_pos: Point) {
+        ed!("gesture_long_press({touch_pos:?}) before=[{}]", self.dbg_state());
+
+        let mut menu = action::Menu::new(
+            self.font_size.get(),
+            self.action_fg_color.get(),
+            self.action_bg_color.get(),
+            self.action_padding.get(),
+            self.action_spacing.get(),
+            self.window_scale.get(),
+        );
+
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::gesture_long_press"));
+
+        let mut local_pos = touch_pos;
+        self.abs_to_local(&mut local_pos);
+
+        if self.text.get().is_empty() {
+            menu.add("Paste", ACTION_PASTE);
+            // Set the menu pos to the current cursor pos
+            menu.pos = self.get_cursor_pos();
+
+            *self.touch_info.arm.lock() = TouchArm::Inactive;
+        } else {
+            menu.add("Copy", ACTION_COPY);
+            menu.add("Paste", ACTION_PASTE);
+            menu.add("Select All", ACTION_SELALL);
+
+            self.start_touch_select(local_pos, atom);
+
+            {
+                let editor = self.editor.lock();
+                let (curs_lhs, _) = self.get_select_handles(&editor).unwrap();
+                // Set the menu pos to the LHS of the selection
+                menu.pos = curs_lhs + self.behave.inner_pos();
+            }
+
+            // Adjust menu pos so RHS doesnt leave the RHS of this widget
+            let rect = self.rect.get();
+            if menu.pos.x + menu.total_width() > rect.w {
+                menu.pos.x = rect.w - menu.total_width();
+            }
+
+            // Word-selected: release must not set the cursor
+            *self.touch_info.arm.lock() = TouchArm::Inactive;
+        }
+        self.action_mode.set(menu);
+    }
+
+    /// `DragMove` driven by the precision drag recognizer: handle
+    /// drag, content scroll, or nothing, per the armed state.
+    fn gesture_drag_move(&self, touch_pos: Point) -> bool {
         if !self.is_active.get() {
             return false
         }
 
-        // We must update with non relative touch_pos bcos when doing vertical scrolling
-        // we will modify the scroll, which is used by abs_to_local(), which is used
-        // to then calculate the max scroll. So it ends up jumping around.
-        // We use the abs touch_pos without scroll adjust applied for vert scrolling.
-        let touch_state = {
-            let mut touch_info = self.touch_info.lock();
-            touch_info.update(&touch_pos);
-            touch_info.state.clone()
-        };
-        //t!("handle_touch_move({touch_pos:?})  touch_state={touch_state:?}");
-        match &touch_state {
-            TouchStateAction::Inactive => return false,
-            TouchStateAction::StartSelect => {
-                let mut menu = action::Menu::new(
-                    self.font_size.get(),
-                    self.action_fg_color.get(),
-                    self.action_bg_color.get(),
-                    self.action_padding.get(),
-                    self.action_spacing.get(),
-                    self.window_scale.get(),
-                );
+        let arm = self.touch_info.arm.lock().clone();
+        ed!("gesture_drag_move({touch_pos:?}) arm={arm:?}");
 
-                let atom = &mut self
-                    .renderer
-                    .make_guard(gfxtag!("BaseEdit::TouchStateAction::StartSelect"));
-
-                if self.text.get().is_empty() {
-                    menu.add("Paste", ACTION_PASTE);
-                    // Set the menu pos to the current cursor pos
-                    menu.pos = self.get_cursor_pos();
-
-                    self.touch_info.lock().state = TouchStateAction::Inactive;
-                } else {
-                    menu.add("Copy", ACTION_COPY);
-                    menu.add("Paste", ACTION_PASTE);
-                    menu.add("Select All", ACTION_SELALL);
-
-                    self.abs_to_local(&mut touch_pos);
-                    self.start_touch_select(touch_pos, atom);
-                    self.redraw_select(renderer, atom.batch_id);
-
-                    {
-                        let editor = self.editor.lock();
-                        let (curs_lhs, _) = self.get_select_handles(&editor).unwrap();
-                        // Set the menu pos to the LHS of the selection
-                        menu.pos = curs_lhs + self.behave.inner_pos();
-                    }
-
-                    // Adjust menu pos so RHS doesnt leave the RHS of this widget
-                    let rect = self.rect.get();
-                    if menu.pos.x + menu.total_width() > rect.w {
-                        menu.pos.x = rect.w - menu.total_width();
-                    }
-
-                    d!("touch state: StartSelect -> Select");
-                    self.touch_info.lock().state = TouchStateAction::Select;
-                }
-                self.action_mode.set(menu);
-                self.action_mode.redraw(atom.batch_id);
+        match arm {
+            TouchArm::Inactive => false,
+            TouchArm::Handle { side } => {
+                self.drag_select_handle(touch_pos, side);
+                true
             }
-            TouchStateAction::DragSelectHandle { side } => {
-                let rect = self.rect.get();
-                let is_touch_hover = rect.contains(touch_pos);
-
-                let sel_sender = self.sel_sender.lock().clone().unwrap();
-                // Mouse is outside rect?
-                // If so we gotta scroll it while selecting.
-                if !is_touch_hover {
-                    // This process will begin selecting text and applying scroll too.
-                    sel_sender.try_send(Some((touch_pos, Some(*side)))).unwrap();
-                } else {
-                    // Stop any existing select/scroll process
-                    sel_sender.try_send(None).unwrap();
-                    // Mouse is inside so just select the text once and be done.
-                    self.handle_select(renderer, touch_pos, Some(*side));
-                }
+            TouchArm::Pressed => {
+                self.drag_pressed(touch_pos);
+                true
             }
-            TouchStateAction::ScrollVert { start_pos, scroll_start } => {
-                let travel_dist = self.behave.scroll_ctrl().travel(*start_pos, touch_pos);
-                let mut scroll = scroll_start + travel_dist;
-                scroll = scroll.clamp(0., self.behave.max_scroll());
-                if (self.scroll.load(Ordering::Relaxed) - scroll).abs() < VERT_SCROLL_UPDATE_INC {
-                    return true
-                }
-                self.scroll.store(scroll, Ordering::Release);
-                let atom = &mut self
-                    .renderer
-                    .make_guard(gfxtag!("BaseEdit::TouchStateAction::ScrollVert"));
-                self.redraw_scroll(renderer, atom.batch_id);
-            }
-            TouchStateAction::SetCursorPos => {
-                // TBH I can't even see the cursor under my thumb so I'll just
-                // comment this for now.
-            }
-            _ => {}
         }
-        true
     }
-    async fn handle_touch_end(&self, mut touch_pos: Point) -> bool {
-        //t!("handle_touch_end({touch_pos:?})");
-        self.abs_to_local(&mut touch_pos);
 
-        let state = self.touch_info.lock().stop();
-        match state {
-            TouchStateAction::Inactive => return false,
-            TouchStateAction::Started { pos: _, instant: _ } | TouchStateAction::SetCursorPos => {
-                let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_touch_end"));
-                self.touch_set_cursor_pos(atom, touch_pos);
-                self.redraw(atom);
-            }
-            _ => {}
+    /// `Up` passthrough: finalize the touch. A `Pressed` release that
+    /// did not engage scrolling positions the cursor (this covers the
+    /// tap, the tap/long-press dead zone, and off-direction drags —
+    /// exactly the old release behavior). Also stops selection
+    /// autoscroll and requests focus.
+    async fn gesture_up(&self, touch_pos: Point) -> bool {
+        let arm = std::mem::replace(&mut *self.touch_info.arm.lock(), TouchArm::Inactive);
+        let mode = std::mem::replace(&mut *self.touch_info.mode.lock(), DragMode::Undecided);
+        *self.touch_info.scroll_drag.lock() = None;
+        ed!("gesture_up({touch_pos:?}) final_arm={arm:?} mode={mode:?}");
+
+        if matches!(arm, TouchArm::Inactive) {
+            return false
+        }
+
+        if matches!(arm, TouchArm::Pressed) && !matches!(mode, DragMode::Scroll) {
+            let mut local_pos = touch_pos;
+            self.abs_to_local(&mut local_pos);
+            let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::gesture_up"));
+            self.touch_set_cursor_pos(atom, local_pos);
         }
 
         // Stop any selection scrolling
         let scroll_sender = self.sel_sender.lock().clone().unwrap();
         scroll_sender.try_send(None).unwrap();
 
-        let node = self.node();
-        node.trigger("focus_request", vec![]).await.unwrap();
+        let need_focus = {
+            #[cfg(target_os = "android")]
+            {
+                !self.is_focused.get() || !is_ime_visible()
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                !self.is_focused.get()
+            }
+        };
+
+        if need_focus {
+            let node = self.node();
+            node.trigger("focus_request", vec![]).await.unwrap();
+        }
 
         true
     }
 
     fn touch_set_cursor_pos(&self, atom: &mut PropertyAtomicGuard, touch_pos: Point) {
-        t!("touch_set_cursor_pos({touch_pos:?})");
+        ed!("touch_set_cursor_pos({touch_pos:?}) before=[{}]", self.dbg_state());
 
         let mut editor = self.editor.lock();
         editor.move_to_pos(touch_pos);
         editor.refresh();
         drop(editor);
+        ed!("touch_set_cursor_pos: moved cursor after=[{}]", self.dbg_state());
 
         self.pause_blinking();
         self.finish_select(atom);
     }
 
     fn finish_select(&self, atom: &mut PropertyAtomicGuard) {
+        ed!(
+            "finish_select: phone_select={} -> false",
+            self.is_phone_select.load(Ordering::Relaxed)
+        );
         self.is_phone_select.store(false, Ordering::Release);
         self.hide_cursor.store(false, Ordering::Release);
         self.select_text.clone().set_null(atom, Role::Internal, 0).unwrap();
+        // The action menu belongs to the selection; dismiss it too.
+        self.action_mode.clear();
     }
 
-    fn handle_select<R: RenderApi>(&self, renderer: &R, mouse_pos: Point, side: Option<isize>) {
+    fn handle_select(&self, mouse_pos: Point, side: Option<isize>) {
         //t!("handle_select({mouse_pos:?}, {side:?})");
         let rect = self.rect.get();
         let is_mouse_hover = rect.contains(mouse_pos);
 
         let mut clip_mouse_pos = rect.clip_point(mouse_pos);
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_mouse_move"));
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::handle_mouse_move"));
 
         // Handle scrolling
         if !is_mouse_hover {
@@ -978,8 +1076,6 @@ impl BaseEdit {
             let delta = travel * SELECT_SCROLL_TRAVEL_SPEED;
             let scroll = (self.scroll.load(Ordering::Relaxed) + delta).clamp(0., max_scroll);
             self.scroll.store(scroll, Ordering::Release);
-
-            self.redraw_scroll(renderer, atom.batch_id);
         }
 
         // Move mouse pos within this widget
@@ -1009,7 +1105,13 @@ impl BaseEdit {
             // Mouse select does not have this limitation.
             if let Some(side) = side {
                 assert!(side.abs() == 1);
-                assert!(self.is_phone_select.load(Ordering::Relaxed));
+                // Phone-select mode can be finished concurrently (e.g. the
+                // IME collapsed the selection) while a queued drag update
+                // was still in flight. Drop the stale update.
+                if !self.is_phone_select.load(Ordering::Relaxed) {
+                    ed!("handle_select: phone select finished mid-drag, dropping update");
+                    return
+                }
 
                 // Prevent selection crossing itself
                 if side == -1 {
@@ -1035,10 +1137,11 @@ impl BaseEdit {
             assert!(start < end);
 
             //t!("handle_select(): set_selection({start}, {end})");
+            ed!("handle_select: set_selection({start}, {end}) side={side:?} prev=({prev_start}, {prev_end})");
             editor.set_selection(start, end);
             editor.selected_text()
         };
-        //d!("Select {seltext:?} from {clip_mouse_pos:?} (unclipped: {mouse_pos:?})");
+        ed!("handle_select: seltext={seltext:?} clip_pos={clip_mouse_pos:?}");
 
         // Android editor impl detail: selection disappears when anchor == index
         // But we disallow this so it should never happen. Just making a note of it here.
@@ -1057,114 +1160,27 @@ impl BaseEdit {
 
         self.pause_blinking();
         //self.behave.apply_cursor_scroll();
-        self.redraw_cursor(renderer);
-        self.redraw_select(renderer, atom.batch_id);
     }
 
-    /// Cursor must be redrawn after calling this either via `redraw_cursor()` or `redraw()`.
+    /// Holds the cursor solid while the user interacts. The renderer-managed
+    /// anim resumes blinking by itself once the idle time passes; there is no
+    /// app-side timed commit and the committed cursor draw call (which
+    /// references the anim) never needs to change for pausing.
     fn pause_blinking(&self) {
-        // First, redraw cursor with static cursor
-        self.is_blink_paused.store(true, Ordering::Relaxed);
-        //self.redraw_cursor(&self.renderer);
-
-        let cursor_idle_time = self.cursor_idle_time.get();
-        let me = self.me.clone();
-
-        // Spawn task to sleep and then restore animation
-        self.ex
-            .spawn(async move {
-                // Sleep for idle time
-                msleep(cursor_idle_time as u64).await;
-
-                let Some(self_) = me.upgrade() else { return };
-
-                // Restore animation draw calls
-                let pos = self_.get_cursor_pos();
-                let anim = self_.cursor_anim.lock().clone().unwrap();
-                let instrs = vec![DrawInstruction::Move(pos), DrawInstruction::Animation(anim)];
-                self_.renderer.replace_draw_calls(
-                    None,
-                    vec![(
-                        self_.cursor_dc_key,
-                        DrawCall::new(instrs, vec![], 2, "chatedit_anim_curs"),
-                    )],
-                );
-
-                self_.is_blink_paused.store(false, Ordering::Relaxed);
-            })
-            .detach();
+        let anim = self.cursor_anim.lock().clone();
+        let Some(anim) = anim else { return };
+        anim.pause(0, self.cursor_idle_time.get() as u64);
     }
 
     #[instrument(target = "ui::edit")]
-    fn redraw(&self, atom: &mut PropertyAtomicGuard) {
-        let draw_update = self.make_draw_calls();
-        self.renderer.replace_draw_calls(Some(atom.batch_id), draw_update.draw_calls);
-    }
-
-    /// Called when scroll changes. Moves content up or down. Nothing more.
-    fn redraw_scroll<R: RenderApi>(&self, renderer: &R, batch_id: BatchGuardId) {
-        let rect = self.rect.get();
-
-        let mut content_instrs = vec![DrawInstruction::ApplyView(rect.with_zero_pos())];
-        let mut bg_instrs = self.regen_bg_mesh(renderer);
-        content_instrs.append(&mut bg_instrs);
-        content_instrs.push(DrawInstruction::Move(self.behave.scroll()));
-
-        let draw_main = vec![(
-            self.content_dc_key,
-            DrawCall::new(
-                content_instrs,
-                vec![
-                    self.text_dc_key,
-                    self.phone_select_handle_dc_key,
-                    self.cursor_dc_key,
-                    self.select_dc_key,
-                ],
-                0,
-                "chatedit_content",
-            ),
-        )];
-        renderer.replace_draw_calls(Some(batch_id), draw_main);
-    }
-
-    fn redraw_cursor<R: RenderApi>(&self, renderer: &R) {
-        let instrs = self.get_cursor_instrs(renderer);
-        let draw_calls = vec![(self.cursor_dc_key, DrawCall::new(instrs, vec![], 2, "curs_redr"))];
-        renderer.replace_draw_calls(None, draw_calls);
-    }
-
-    fn redraw_select<R: RenderApi>(&self, renderer: &R, batch_id: BatchGuardId) {
-        //t!("redraw_select");
-        let sel_instrs = self.regen_select_mesh(renderer);
-        let phone_sel_instrs = self.regen_phone_select_handle_mesh(renderer);
-        let draw_calls = vec![
-            (self.select_dc_key, DrawCall::new(sel_instrs, vec![], 0, "chatedit_sel")),
-            (
-                self.phone_select_handle_dc_key,
-                DrawCall::new(phone_sel_instrs, vec![], 1, "chatedit_phone_sel_redraw_sel"),
-            ),
-        ];
-        renderer.replace_draw_calls(Some(batch_id), draw_calls);
-    }
-
-    fn get_cursor_instrs<R: RenderApi>(&self, _renderer: &R) -> Vec<DrawInstruction> {
+    fn get_cursor_instrs(&self) -> Vec<DrawInstruction> {
         if !self.is_focused.get() || self.hide_cursor.load(Ordering::Relaxed) {
             return vec![]
         }
 
         let pos = self.get_cursor_pos();
-        let mut instrs = Vec::with_capacity(2);
-        instrs.push(DrawInstruction::Move(pos));
-
-        if self.is_blink_paused.load(Ordering::Relaxed) {
-            let mesh = self.cursor_mesh.lock().clone().unwrap();
-            instrs.push(DrawInstruction::Draw(mesh));
-        } else {
-            // Use the animation for cursor blinking
-            let anim = self.cursor_anim.lock().clone().unwrap();
-            instrs.push(DrawInstruction::Animation(anim));
-        }
-        instrs
+        let anim = self.cursor_anim.lock().clone().unwrap();
+        vec![DrawInstruction::Move(pos), DrawInstruction::Animation(anim)]
     }
 
     fn regen_bg_mesh<R: RenderApi>(&self, renderer: &R) -> Vec<DrawInstruction> {
@@ -1226,10 +1242,8 @@ impl BaseEdit {
 
         // Render text
         let editor = self.editor.lock();
-        let layout = editor.layout();
 
-        let mut render_instrs =
-            text::render_layout(layout, &self.renderer, gfxtag!("chatedit_txt_mesh"));
+        let mut render_instrs = editor.render_instrs(&self.renderer, gfxtag!("chatedit_txt_mesh"));
         instrs.append(&mut render_instrs);
 
         instrs
@@ -1239,15 +1253,14 @@ impl BaseEdit {
         let mut instrs = vec![DrawInstruction::Move(self.behave.inner_pos())];
 
         let editor = self.editor.lock();
-        let layout = editor.layout();
 
-        let sel = editor.selection(1);
         let sel_color = self.hi_bg_color.get();
-        if !sel.is_collapsed() {
+        let sel_rects = editor.selection_rects();
+        if !sel_rects.is_empty() {
             let mut mesh = MeshBuilder::new(gfxtag!("chatedit_select_mesh"));
-            sel.geometry_with(layout, |rect: parley::BoundingBox, _| {
-                mesh.draw_filled_box(&rect.into(), sel_color);
-            });
+            for rect in sel_rects {
+                mesh.draw_filled_box(&rect, sel_color);
+            }
 
             instrs.push(DrawInstruction::Draw(mesh.alloc(renderer).draw_untextured()));
         }
@@ -1273,18 +1286,19 @@ impl BaseEdit {
         vec![DrawInstruction::Draw(mesh.alloc(renderer).draw_untextured())]
     }
 
-    /// This does not make use of an atom since we want to de-atomize updating this widget from
-    /// its dependencies so theres zero latency when typing.
+    /// This does not make use of its own batch since we want to de-atomize updating this
+    /// widget from its dependencies so theres zero latency when typing.
+    /// Runs inside the draw pass, so it borrows the pass's atom: property
+    /// echoes are deferred there and no extra pass is triggered.
     /// Should be called when text contents changes.
-    fn eval_rect(&self) {
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::make_draw_calls"));
+    fn eval_rect(&self, atom: &mut PropertyAtomicGuard) {
         self.behave.eval_rect(atom);
     }
 
     fn make_draw_calls(&self) -> DrawUpdate {
         let rect = self.rect.get();
 
-        let cursor_instrs = self.get_cursor_instrs(&self.renderer);
+        let cursor_instrs = self.get_cursor_instrs();
         let txt_instrs = self.regen_txt_mesh();
         let sel_instrs = self.regen_select_mesh(&self.renderer);
         let phone_sel_instrs = self.regen_phone_select_handle_mesh(&self.renderer);
@@ -1375,10 +1389,9 @@ impl BaseEdit {
             panic!("self destroyed before insert_text_method_task was stopped!");
         };
 
-        let atom = &mut self_.renderer.make_guard(gfxtag!("BaseEdit::process_insert_text_method"));
-        self_.editor.lock().insert(&text, atom);
-        self_.eval_rect();
-        self_.redraw(atom);
+        let atom = &mut self_.redraw.make_guard(gfxtag!("BaseEdit::process_insert_text_method"));
+        self_.insert_text(&text, atom);
+        ed!("insert_text method: inserted {text:?} after=[{}]", self_.dbg_state());
         true
     }
 
@@ -1401,13 +1414,14 @@ impl BaseEdit {
         #[cfg(target_os = "android")]
         {
             let input_type = self_.android_input_type.get();
+            ed!("focus method: setting android input_type={input_type}");
             self_.editor.lock().set_input_type(input_type);
         }
-
         self_.editor.lock().focus();
-        let atom = &mut self_.renderer.make_guard(gfxtag!("BaseEdit::process_focus_method"));
+
+        let atom = &mut self_.redraw.make_guard(gfxtag!("BaseEdit::process_focus_method"));
         self_.is_focused.set(atom, true);
-        self_.redraw(atom);
+        ed!("focus method: done after=[{}]", self_.dbg_state());
         true
     }
     async fn process_unfocus_method(me: &Weak<Self>, sub: &MethodCallSub) -> bool {
@@ -1426,28 +1440,75 @@ impl BaseEdit {
         };
 
         self_.editor.lock().unfocus();
-        let atom = &mut self_.renderer.make_guard(gfxtag!("BaseEdit::process_unfocus_method"));
+        let atom = &mut self_.redraw.make_guard(gfxtag!("BaseEdit::process_unfocus_method"));
         self_.is_focused.set(atom, false);
-        self_.redraw(atom);
+        ed!("unfocus method: done after=[{}]", self_.dbg_state());
+        true
+    }
+
+    /// Hides the IME soft keyboard without leaving the focused state:
+    /// the cursor stays visible. Used when an overlay (the emoji
+    /// picker panel) replaces the keyboard.
+    async fn process_hide_ime_method(me: &Weak<Self>, sub: &MethodCallSub) -> bool {
+        let Ok(method_call) = sub.receive().await else {
+            debug!(target: "ui::chatedit", "Event relayer closed");
+            return false
+        };
+
+        t!("method called: hide_ime({method_call:?})");
+        assert!(method_call.send_res.is_none());
+        assert!(method_call.data.is_empty());
+
+        let Some(self_) = me.upgrade() else {
+            // Should not happen
+            panic!("self destroyed before hide_ime_method_task was stopped!");
+        };
+
+        self_.editor.lock().unfocus();
+        ed!("hide_ime method: done after=[{}]", self_.dbg_state());
         true
     }
 
     #[cfg(target_os = "android")]
     fn handle_android_event(&self, state: AndroidTextInputState) {
         if !self.is_active.get() {
+            ed!("handle_android_event: DROP inactive state={state:?}");
             return
         }
 
-        t!("handle_android_event({state:?})");
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_android_event"));
+        // A handle drag owns the selection. Our own `set_selection` calls
+        // push state to the IME and Android's input connection echoes it
+        // back, sometimes normalized to a collapsed (cursor-only)
+        // selection. Applying such an echo mid-drag would collapse our
+        // selection and finish phone-select mode, making the handles
+        // vanish. Drop it: the next drag update re-asserts the real
+        // selection.
+        let drag_in_progress = { matches!(*self.touch_info.arm.lock(), TouchArm::Handle { .. }) };
+        if drag_in_progress && state.select.0 == state.select.1 {
+            ed!("handle_android_event: DROP collapsed IME echo mid-drag state={state:?}");
+            return
+        }
 
+        ed!("handle_android_event: ENTER incoming={state:?} before=[{}]", self.dbg_state());
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::handle_android_event"));
+
+        let is_new_select_collapsed = state.select.0 == state.select.1;
         let (is_text_changed, is_select_changed, is_compose_changed) = {
             let mut editor = self.editor.lock();
             // Diff old and new state so we know what changed
+            let old_text = editor.state.text.clone();
+            let old_select = editor.state.select;
+            let old_compose = editor.state.compose;
             let diff = (
                 editor.state.text != state.text,
                 editor.state.select != state.select,
                 editor.state.compose != state.compose,
+            );
+            ed!(
+                "handle_android_event: diff text_changed={} (old={:?} new={:?}) select_changed={} (old={:?} new={:?}) compose_changed={} (old={:?} new={:?})",
+                diff.0, old_text, state.text,
+                diff.1, old_select, state.select,
+                diff.2, old_compose, state.compose,
             );
             editor.state = state;
             editor.on_buffer_changed(atom);
@@ -1456,14 +1517,19 @@ impl BaseEdit {
 
         // Nothing changed. Just return.
         if !is_text_changed && !is_select_changed && !is_compose_changed {
-            //t!("Skipping update since nothing changed");
+            ed!("handle_android_event: no-op (nothing changed), after=[{}]", self.dbg_state());
             return
         }
 
-        //t!("is_text_changed={is_text_changed}, is_select_changed={is_select_changed}, is_compose_changed={is_compose_changed}");
+        ed!(
+            "handle_android_event: applying text_changed={} select_changed={} compose_changed={} collapsed={}",
+            is_text_changed, is_select_changed, is_compose_changed, is_new_select_collapsed
+        );
+
         // Only redraw once we have the parent_rect
         // Can happen when we receive an Android event before the canvas is ready
         if self.parent_rect.lock().is_none() {
+            ed!("handle_android_event: parent_rect not ready yet, bailing before redraw");
             return
         }
 
@@ -1474,27 +1540,35 @@ impl BaseEdit {
 
         // Text changed - finish any active selection
         if is_text_changed {
-            self.eval_rect();
             self.behave.apply_cursor_scroll();
 
             self.pause_blinking();
             //assert!(state.text != self.text.get());
             self.finish_select(atom);
-            self.redraw(atom);
+            self.action_mode.clear();
+            ed!("handle_android_event: handled text change, after=[{}]", self.dbg_state());
         } else if is_select_changed {
-            // Redrawing the entire text just for select changes is expensive
-            self.redraw_cursor(&self.renderer);
-            //t!("handle_android_event calling redraw_select");
-            self.redraw_select(&self.renderer, atom.batch_id);
+            // The IME can collapse a phone-style word selection out from under
+            // us (e.g. it repositions the cursor when the keyboard is shown).
+            // The selection handles are then stale, so finish phone-select mode.
+            // A handle drag always maintains a range, so its IME echoes are
+            // unaffected.
+            if is_new_select_collapsed && self.is_phone_select.load(Ordering::Relaxed) {
+                ed!("handle_android_event: IME collapsed the phone selection, finishing select");
+                d!("IME has collapsed selection!");
+                self.finish_select(atom);
+            }
+            ed!("handle_android_event: handled select change, after=[{}]", self.dbg_state());
+        } else if is_compose_changed {
+            self.editor.lock().refresh();
+            ed!("handle_android_event: handled compose change, after=[{}]", self.dbg_state());
         }
     }
 }
 
 impl Drop for BaseEdit {
     fn drop(&mut self) {
-        let atom = self.renderer.make_guard(gfxtag!("BaseEdit::drop"));
-        self.renderer
-            .replace_draw_calls(Some(atom.batch_id), vec![(self.text_dc_key, Default::default())]);
+        self.renderer.replace_draw_calls(vec![(self.text_dc_key, Default::default())]);
     }
 }
 
@@ -1525,61 +1599,71 @@ impl UIObject for BaseEdit {
         let unfocus_task =
             ex.spawn(async move { while Self::process_unfocus_method(&me2, &method_sub).await {} });
 
+        let method_sub = node_ref.subscribe_method_call("hide_ime").unwrap();
+        let me2 = me.clone();
+        let hide_ime_task = ex
+            .spawn(async move { while Self::process_hide_ime_method(&me2, &method_sub).await {} });
+
         let mut on_modify = OnModify::new(ex.clone(), self.node.clone(), me.clone());
-        on_modify.when_change(self.is_focused.prop(), Self::change_focus);
+        on_modify.when_change_external(self.is_focused.prop(), Self::change_focus);
 
         // When text has been changed.
         // Cursor and selection might be invalidated.
-        async fn reset(self_: Arc<BaseEdit>, batch: BatchGuardPtr) {
-            let atom = &mut batch.spawn();
+        async fn reset(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
             //self_.select_text.set_null(Role::Internal, 0).unwrap();
             self_.scroll.store(0., Ordering::Release);
-            self_.eval_rect();
-            self_.redraw(atom);
+            self_.redraw.trigger();
         }
-        async fn redraw(self_: Arc<BaseEdit>, batch: BatchGuardPtr) {
-            let atom = &mut batch.spawn();
-            self_.eval_rect();
-            self_.redraw(atom);
+        async fn redraw(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
+            self_.redraw.trigger();
         }
-        async fn set_text(self_: Arc<BaseEdit>, batch: BatchGuardPtr) {
+        async fn rect_changed(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
+            // A width change can crop scrolled content; re-clamp.
+            self_.reset_scroll();
+            self_.redraw.trigger();
+        }
+        async fn set_text(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
             self_.editor.lock().on_text_prop_changed();
-            let atom = &mut batch.spawn();
-            self_.eval_rect();
-            self_.redraw(atom);
+            self_.redraw.trigger();
         }
 
-        on_modify.when_change(self.rect.prop(), redraw);
-        on_modify.when_change(self.baseline.prop(), redraw);
-        on_modify.when_change(self.lineheight.prop(), redraw);
-        on_modify.when_change(self.select_ascent.prop(), redraw);
-        on_modify.when_change(self.select_descent.prop(), redraw);
-        on_modify.when_change(self.handle_descent.prop(), redraw);
-        on_modify.when_change(self.padding.clone(), redraw);
-        on_modify.when_change(self.text.prop(), set_text);
+        on_modify.when_change_external(self.rect.prop(), rect_changed);
+        on_modify.when_change_external(self.baseline.prop(), redraw);
+        on_modify.when_change_external(self.lineheight.prop(), redraw);
+        on_modify.when_change_external(self.select_ascent.prop(), redraw);
+        on_modify.when_change_external(self.select_descent.prop(), redraw);
+        on_modify.when_change_external(self.handle_descent.prop(), redraw);
+        on_modify.when_change_external(self.padding.clone(), redraw);
+        on_modify.when_change_external(self.text.prop(), set_text);
         // The commented properties are modified on input events
         // So then redraw() will get repeatedly triggered when these properties
         // are changed. We should find a solution. For now the hooks are disabled.
         //on_modify.when_change(scroll.prop(), redraw);
         //on_modify.when_change(cursor_pos.prop(), redraw);
-        on_modify.when_change(self.font_size.prop(), redraw);
-        on_modify.when_change(self.text.prop(), reset);
-        on_modify.when_change(self.text_color.prop(), redraw);
-        on_modify.when_change(self.placeholder_text.prop(), redraw);
-        on_modify.when_change(self.placeholder_color.prop(), redraw);
-        on_modify.when_change(self.hi_bg_color.prop(), redraw);
+        on_modify.when_change_external(self.font_size.prop(), redraw);
+        on_modify.when_change_external(self.text.prop(), reset);
+        on_modify.when_change_external(self.text_color.prop(), redraw);
+        on_modify.when_change_external(self.placeholder_text.prop(), redraw);
+        on_modify.when_change_external(self.placeholder_color.prop(), redraw);
+        on_modify.when_change_external(self.hi_bg_color.prop(), redraw);
         //on_modify.when_change(selected.clone(), redraw);
-        on_modify.when_change(self.z_index.prop(), redraw);
-        on_modify.when_change(self.debug.prop(), redraw);
+        on_modify.when_change_external(self.z_index.prop(), redraw);
+        on_modify.when_change_external(self.debug.prop(), redraw);
 
         async fn regen_cursor(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
-            // Free the cache
-            *self_.cursor_mesh.lock() = None;
+            // Rebuild the visible frame so cursor style changes apply to
+            // the blink animation.
+            let mesh = self_.regen_cursor_mesh(&self_.renderer);
+            let dc_visible =
+                DrawCall::new(vec![DrawInstruction::Draw(mesh)], vec![], 2, "cursor_vis");
+            if let Some(anim) = self_.cursor_anim.lock().as_ref() {
+                anim.update(0, AnimFrame::new(self_.cursor_blink_time.get(), dc_visible));
+            }
         }
-        on_modify.when_change(self.cursor_color.prop(), regen_cursor);
-        on_modify.when_change(self.cursor_ascent.prop(), regen_cursor);
-        on_modify.when_change(self.cursor_descent.prop(), regen_cursor);
-        on_modify.when_change(self.cursor_width.prop(), regen_cursor);
+        on_modify.when_change_external(self.cursor_color.prop(), regen_cursor);
+        on_modify.when_change_external(self.cursor_ascent.prop(), regen_cursor);
+        on_modify.when_change_external(self.cursor_descent.prop(), regen_cursor);
+        on_modify.when_change_external(self.cursor_width.prop(), regen_cursor);
 
         // Create the blinking cursor animation using SeqAnim
         // Frame 0: visible cursor
@@ -1588,12 +1672,8 @@ impl UIObject for BaseEdit {
         let cursor_mesh = self.regen_cursor_mesh(&self.renderer);
 
         // Frame 0: visible cursor (just the draw, no position)
-        let dc_visible = DrawCall::new(
-            vec![DrawInstruction::Draw(cursor_mesh.clone())],
-            vec![],
-            2,
-            "cursor_vis",
-        );
+        let dc_visible =
+            DrawCall::new(vec![DrawInstruction::Draw(cursor_mesh)], vec![], 2, "cursor_vis");
         cursor_anim.update(0, AnimFrame::new(self.cursor_blink_time.get(), dc_visible));
 
         // Frame 1: invisible (empty draw call)
@@ -1601,7 +1681,6 @@ impl UIObject for BaseEdit {
         cursor_anim.update(1, AnimFrame::new(self.cursor_blink_time.get(), dc_invisible));
 
         *self.cursor_anim.lock() = Some(cursor_anim);
-        *self.cursor_mesh.lock() = Some(cursor_mesh);
 
         let (sel_sender, sel_recvr) = async_channel::unbounded();
         *self.sel_sender.lock() = Some(sel_sender);
@@ -1620,14 +1699,14 @@ impl UIObject for BaseEdit {
                             if let Some((mouse_pos, side)) = scroll_stat {
                                 let self_ = me2.upgrade().unwrap();
                                 //t!("select task interrupt: {mouse_pos:?} (side={side:?})");
-                                self_.handle_select(&self_.renderer, mouse_pos, side);
+                                self_.handle_select(mouse_pos, side);
                             };
                         }
                         _ = msleep(SELECT_TASK_UPDATE_TIME).fuse() => {
                             if let Some((mouse_pos, side)) = scroll_stat {
                                 let self_ = me2.upgrade().unwrap();
                                 //t!("select task update: {mouse_pos:?} (side={side:?})");
-                                self_.handle_select(&self_.renderer, mouse_pos, side);
+                                self_.handle_select(mouse_pos, side);
                             };
                         }
                     }
@@ -1637,13 +1716,13 @@ impl UIObject for BaseEdit {
                     if let Some((mouse_pos, side)) = scroll_stat {
                         let self_ = me2.upgrade().unwrap();
                         //t!("select task wake up: {mouse_pos:?} (side={side:?})");
-                        self_.handle_select(&self_.renderer, mouse_pos, side);
+                        self_.handle_select(mouse_pos, side);
                     };
                 }
             }
         });
 
-        let mut tasks = vec![insert_text_task, focus_task, unfocus_task, sel_task];
+        let mut tasks = vec![insert_text_task, focus_task, unfocus_task, hide_ime_task, sel_task];
         tasks.append(&mut on_modify.tasks);
 
         #[cfg(target_os = "android")]
@@ -1675,28 +1754,33 @@ impl UIObject for BaseEdit {
         self.tasks.lock().clear();
         *self.parent_rect.lock() = None;
         self.key_repeat.lock().clear();
-        *self.cursor_mesh.lock() = None;
     }
 
     #[instrument(target = "ui::edit")]
     async fn draw(
         &self,
         parent_rect: Rectangle,
-        _atom: &mut PropertyAtomicGuard,
+        atom: &mut PropertyAtomicGuard,
     ) -> Option<DrawUpdate> {
         *self.parent_rect.lock() = Some(parent_rect);
-        self.eval_rect();
+        self.eval_rect(atom);
+        // The fresh eval may have changed the content height, so re-clamp
+        // the scroll to keep the cursor in view before computing draw instrs.
+        self.behave.apply_cursor_scroll();
         Some(self.make_draw_calls())
     }
 
     async fn handle_char(&self, key: char, mods: KeyMods, repeat: bool) -> bool {
+        ed!("handle_char({key}, {mods:?}, repeat={repeat}) before=[{}]", self.dbg_state());
         t!("handle_char({key}, {mods:?}, {repeat})");
         // First filter for only single digit keys
         if DISALLOWED_CHARS.contains(&key) {
+            ed!("handle_char: {key:?} disallowed, ignoring");
             return false
         }
 
         if !self.is_focused.get() {
+            ed!("handle_char: not focused, ignoring");
             return false
         }
 
@@ -1708,7 +1792,7 @@ impl UIObject for BaseEdit {
             repeater.key_down(PressedKey::Char(key), repeat)
         };
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_char"));
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::handle_char"));
 
         if mods.ctrl || mods.alt || mods.logo {
             if repeat {
@@ -1724,23 +1808,24 @@ impl UIObject for BaseEdit {
 
         t!("Key {:?} has {} actions", key, actions);
         let key_str = key.to_string().repeat(actions as usize);
-        self.editor.lock().insert(&key_str, atom);
-        self.eval_rect();
-        self.behave.apply_cursor_scroll();
+        self.insert_text(&key_str, atom);
         self.pause_blinking();
-        self.redraw(atom);
+        ed!("handle_char: inserted {key_str:?} after=[{}]", self.dbg_state());
         true
     }
 
     async fn handle_key_down(&self, key: KeyCode, mods: KeyMods, repeat: bool) -> bool {
+        ed!("handle_key_down({key:?}, {mods:?}, repeat={repeat}) before=[{}]", self.dbg_state());
         t!("handle_key_down({key:?}, {mods:?}, {repeat})");
         // First filter for only single digit keys
         // Avoid processing events handled by handle_char()
         if !ALLOWED_KEYCODES.contains(&key) {
+            ed!("handle_key_down: {key:?} not in ALLOWED_KEYCODES, ignoring");
             return false
         }
 
         if !self.is_focused.get() {
+            ed!("handle_key_down: not focused, ignoring");
             return false
         }
 
@@ -1754,12 +1839,13 @@ impl UIObject for BaseEdit {
             t!("Key {:?} has {} actions", key, actions);
         }
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_key_down"));
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::handle_key_down"));
 
         let mut is_handled = false;
         for _ in 0..actions {
             is_handled = self.handle_key(&key, &mods, atom);
         }
+        ed!("handle_key_down: {key:?} handled={is_handled} after=[{}]", self.dbg_state());
         is_handled
     }
 
@@ -1795,8 +1881,7 @@ impl UIObject for BaseEdit {
             menu.pos = mouse_pos - rect.pos();
 
             self.action_mode.set(menu);
-            let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_mouse_btn_down"));
-            self.action_mode.redraw(atom.batch_id);
+            self.redraw.trigger();
 
             return true
         }
@@ -1806,14 +1891,16 @@ impl UIObject for BaseEdit {
             return false
         }
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_mouse_btn_down"));
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::handle_mouse_btn_down"));
 
         // clicking inside box will:
         // 1. make it active
         // 2. begin selection
         if self.is_focused.get() {
+            ed!("handle_mouse_btn_down({btn:?}, {mouse_pos:?}): already focused click");
             d!("BaseEdit clicked");
         } else {
+            ed!("handle_mouse_btn_down({btn:?}, {mouse_pos:?}): focusing widget");
             d!("BaseEdit focused");
             self.is_focused.set(atom, true);
 
@@ -1833,8 +1920,8 @@ impl UIObject for BaseEdit {
         self.mouse_btn_held.store(true, Ordering::Relaxed);
 
         self.pause_blinking();
-        self.eval_rect();
-        self.redraw(atom);
+        // A click moves the cursor; any open action menu is stale now
+        self.action_mode.clear();
         true
     }
 
@@ -1853,7 +1940,7 @@ impl UIObject for BaseEdit {
         // releasing mouse button will end selection
         self.mouse_btn_held.store(false, Ordering::Relaxed);
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_mouse_btn_up"));
+        let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::handle_mouse_btn_up"));
         if let Some(action_id) = self.action_mode.interact(mouse_pos) {
             match action_id {
                 ACTION_COPY => {
@@ -1863,9 +1950,7 @@ impl UIObject for BaseEdit {
                 }
                 ACTION_PASTE => {
                     if let Some(txt) = clipboard::get() {
-                        self.editor.lock().insert(&txt, atom);
-                        self.behave.apply_cursor_scroll();
-                        self.finish_select(atom);
+                        self.insert_text(&txt, atom);
                     }
                 }
                 ACTION_SELALL => {
@@ -1878,11 +1963,10 @@ impl UIObject for BaseEdit {
                 _ => {}
             }
 
-            self.eval_rect();
-            self.redraw(atom);
             return true;
         } else {
-            self.action_mode.redraw(atom.batch_id);
+            // interact() already consumed the menu; the pass re-emits the
+            // (now empty) action overlay when the batch settles.
         }
 
         // Stop any selection scrolling
@@ -1915,7 +1999,7 @@ impl UIObject for BaseEdit {
             // Stop any existing select/scroll process
             sel_sender.send(None).await.unwrap();
             // Mouse is inside so just select the text once and be done.
-            self.handle_select(&self.renderer, mouse_pos, None);
+            self.handle_select(mouse_pos, None);
         }
 
         true
@@ -1926,54 +2010,66 @@ impl UIObject for BaseEdit {
             return false
         }
 
-        let atom = &mut self.renderer.make_guard(gfxtag!("BaseEdit::handle_mouse_wheel"));
-
         let mut scroll =
             self.scroll.load(Ordering::Relaxed) - wheel_pos.y * self.scroll_speed.get();
         scroll = scroll.clamp(0., self.behave.max_scroll());
         t!("handle_mouse_wheel({wheel_pos:?}) [scroll={scroll}]");
         self.scroll.store(scroll, Ordering::Release);
-        self.redraw_scroll(&self.renderer, atom.batch_id);
+        self.redraw.trigger();
 
         true
     }
 
-    fn handle_touch_sync(
-        &self,
-        renderer: &RendererSync,
-        phase: TouchPhase,
-        id: u64,
-        touch_pos: Point,
-    ) -> bool {
-        if !self.is_active.get() {
-            return false
-        }
-
-        // Ignore multi-touch
-        if id != 0 {
-            return false
-        }
-
-        match phase {
-            TouchPhase::Started => self.handle_touch_start(touch_pos),
-            TouchPhase::Moved => self.handle_touch_move(renderer, touch_pos),
-            TouchPhase::Ended | TouchPhase::Cancelled => false,
-        }
+    fn gesture_set(&self) -> GestureSet {
+        GestureSet::EDIT
     }
 
-    async fn handle_touch(&self, phase: TouchPhase, id: u64, touch_pos: Point) -> bool {
+    fn gesture_hit_test(&self, pos: Point) -> bool {
         if !self.is_active.get() {
             return false
         }
 
-        // Ignore multi-touch
-        if id != 0 {
+        let rect = self.rect.get();
+        if rect.contains(pos) {
+            return true
+        }
+
+        // The selection handles and the action menu render outside the
+        // rect but must stay grabbable.
+        if self.select_handle_at(pos).is_some() {
+            return true
+        }
+
+        self.action_mode.hit(pos - rect.pos())
+    }
+
+    async fn handle_gesture(&self, gesture: GestureAction) -> bool {
+        if !self.is_active.get() {
             return false
         }
 
-        match phase {
-            TouchPhase::Started | TouchPhase::Moved | TouchPhase::Cancelled => false,
-            TouchPhase::Ended => self.handle_touch_end(touch_pos).await,
+        match gesture {
+            GestureAction::Down { pos } => self.gesture_down(pos),
+            GestureAction::DragStart { start } => {
+                // Scroll-drag baseline; handle drags ignore it
+                *self.touch_info.scroll_drag.lock() =
+                    Some((start, self.scroll.load(Ordering::Relaxed)));
+                true
+            }
+            GestureAction::DragMove { curr, .. } => self.gesture_drag_move(curr),
+            GestureAction::LongPress { pos } => {
+                self.gesture_long_press(pos);
+                true
+            }
+            GestureAction::Tap { pos } => {
+                let mut local_pos = pos;
+                self.abs_to_local(&mut local_pos);
+                let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::gesture_tap"));
+                self.touch_set_cursor_pos(atom, local_pos);
+                true
+            }
+            GestureAction::Up { pos } => self.gesture_up(pos).await,
+            _ => false,
         }
     }
 }
@@ -1983,5 +2079,91 @@ impl UIObject for BaseEdit {
 impl std::fmt::Debug for BaseEdit {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self.node.upgrade().unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::{
+        app::node::create_multiline_edit,
+        gfx::Renderer,
+        prop::{Property, PropertySubType, PropertyType},
+        scene::{Pimpl, SceneNode, SceneNodeType},
+        ui::RedrawTrigger,
+    };
+
+    /// Inserting programmatically (emoji insert, paste) collapses the
+    /// selection. Any phone-style selection must be finished at the
+    /// same time, or the next draw pass asserts in
+    /// `get_select_handles` (phone-select handles over a collapsed
+    /// selection). See the on-device crash at edit/mod.rs:782.
+    #[test]
+    fn programmatic_insert_finishes_phone_select() {
+        smol::block_on(async {
+            let (redraw_tx, _redraw_rx) = RedrawTrigger::new();
+            let (method_tx, _method_rx) = async_channel::unbounded();
+            let renderer = Renderer::new(method_tx);
+            let ex: ExecutorPtr = Arc::new(smol::Executor::new());
+
+            let node = create_multiline_edit("editz");
+            {
+                let atom = &mut PropertyAtomicGuard::none();
+                node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
+                let rect = node.get_property("rect").unwrap();
+                for (i, v) in [0., 0., 400., 200.].into_iter().enumerate() {
+                    rect.set_f32(atom, Role::App, i, v).unwrap();
+                }
+                let height_range = node.get_property("height_range").unwrap();
+                height_range.set_f32(atom, Role::App, 0, 20.).unwrap();
+                height_range.set_f32(atom, Role::App, 1, 200.).unwrap();
+                node.set_property_f32(atom, Role::App, "font_size", 18.).unwrap();
+                node.set_property_f32(atom, Role::App, "lineheight", 1.).unwrap();
+                node.set_property_f32(atom, Role::App, "baseline", 14.).unwrap();
+                node.set_property_f32(atom, Role::App, "cursor_descent", 6.).unwrap();
+                let padding = node.get_property("padding").unwrap();
+                for i in 0..4 {
+                    padding.set_f32(atom, Role::App, i, 2.).unwrap();
+                }
+            }
+
+            let mut scratch = SceneNode::new("scratch", SceneNodeType::Layer);
+            let mut prop = Property::new("scale", PropertyType::Float32, PropertySubType::Null);
+            prop.set_defaults_f32(vec![1.]).unwrap();
+            scratch.add_property(prop).unwrap();
+            let window_scale = PropertyFloat32::wrap(&scratch, Role::App, "scale", 0).unwrap();
+
+            let node = node
+                .setup(|me| {
+                    BaseEdit::new(
+                        me,
+                        window_scale,
+                        renderer,
+                        redraw_tx,
+                        BaseEditType::MultiLine,
+                        ex,
+                    )
+                })
+                .await;
+            let Pimpl::Edit(edit) = node.pimpl() else { panic!() };
+
+            {
+                let atom = &mut PropertyAtomicGuard::none();
+                node.set_property_str(atom, Role::App, "text", "hello world").unwrap();
+            }
+            edit.on_text_prop_changed();
+
+            // Simulate an active phone-style selection
+            edit.is_phone_select.store(true, Ordering::Relaxed);
+            edit.hide_cursor.store(true, Ordering::Relaxed);
+
+            let atom = &mut PropertyAtomicGuard::none();
+            edit.insert_text("X", atom);
+
+            assert!(!edit.is_phone_select.load(Ordering::Relaxed), "phone select must finish");
+            assert!(!edit.hide_cursor.load(Ordering::Relaxed), "cursor must be re-enabled");
+            assert!(edit.select_text.is_null(0).unwrap(), "selection text must clear");
+        });
     }
 }

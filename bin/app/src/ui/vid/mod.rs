@@ -24,7 +24,7 @@ use tracing::instrument;
 
 use crate::{
     gfx::{
-        anim::Frame, gfxtag, DrawCall, DrawInstruction, DrawMesh, GraphicPipeline,
+        anim::Frame, gfxtag, DrawCall, DrawInstruction, DrawMesh, EpochCache, GraphicPipeline,
         ManagedSeqAnimPtr, ManagedTexturePtr, Rectangle, RenderApi, Renderer,
     },
     mesh::{MeshBuilder, MeshInfo, COLOR_WHITE},
@@ -33,7 +33,7 @@ use crate::{
     ExecutorPtr,
 };
 
-use super::{DrawUpdate, OnModify, UIObject};
+use super::{DrawUpdate, OnModify, RedrawTrigger, UIObject};
 
 mod decode;
 #[allow(dead_code)]
@@ -71,14 +71,13 @@ impl Av1VideoData {
 pub struct Video {
     node: SceneNodeWeak,
     renderer: Renderer,
+    redraw: RedrawTrigger,
     tasks: SyncMutex<Vec<smol::Task<()>>>,
     load_tasks: SyncMutex<Vec<smol::Task<()>>>,
     ex: ExecutorPtr,
     dc_key: u64,
 
     vid_data: Arc<SyncMutex<Option<Av1VideoData>>>,
-    _load_handle: SyncMutex<Option<std::thread::JoinHandle<()>>>,
-    _decoder_handle: SyncMutex<Option<std::thread::JoinHandle<()>>>,
 
     rect: PropertyRect,
     uv: PropertyRect,
@@ -86,11 +85,20 @@ pub struct Video {
     priority: PropertyUint32,
     path: PropertyStr,
 
+    /// Cached draw instructions. Empty means stale. Entries from a dead
+    /// UI epoch are evicted automatically.
+    draw_cache: EpochCache<Vec<DrawInstruction>>,
+
     parent_rect: SyncMutex<Option<Rectangle>>,
 }
 
 impl Video {
-    pub async fn new(node: SceneNodeWeak, renderer: Renderer, ex: ExecutorPtr) -> Pimpl {
+    pub async fn new(
+        node: SceneNodeWeak,
+        renderer: Renderer,
+        redraw: RedrawTrigger,
+        ex: ExecutorPtr,
+    ) -> Pimpl {
         let node_ref = &node.upgrade().unwrap();
         let rect = PropertyRect::wrap(node_ref, Role::Internal, "rect").unwrap();
         let uv = PropertyRect::wrap(node_ref, Role::Internal, "uv").unwrap();
@@ -98,17 +106,18 @@ impl Video {
         let priority = PropertyUint32::wrap(node_ref, Role::Internal, "priority", 0).unwrap();
         let path = PropertyStr::wrap(node_ref, Role::Internal, "path", 0).unwrap();
 
+        let draw_cache = EpochCache::new(&renderer);
+
         let self_ = Arc::new(Self {
             node,
             renderer,
+            redraw,
             tasks: SyncMutex::new(vec![]),
             load_tasks: SyncMutex::new(vec![]),
             ex,
             dc_key: OsRng.gen(),
 
             vid_data: Arc::new(SyncMutex::new(None)),
-            _load_handle: SyncMutex::new(None),
-            _decoder_handle: SyncMutex::new(None),
 
             rect,
             uv,
@@ -116,15 +125,18 @@ impl Video {
             priority,
             path,
 
+            draw_cache,
+
             parent_rect: SyncMutex::new(None),
         });
 
         Pimpl::Video(self_)
     }
 
-    async fn reload(self: Arc<Self>, batch: BatchGuardPtr) {
-        self.load_video();
-        self.redraw(batch).await;
+    async fn reload(self_: Arc<Self>, _batch: BatchGuardPtr) {
+        self_.load_video();
+        self_.draw_cache.clear();
+        self_.redraw.trigger();
     }
 
     fn load_video(&self) {
@@ -132,25 +144,7 @@ impl Video {
 
         // Decoder thread:
         // loads path, decodes AV1 -> RGB, creates textures directly
-        let decoder_handle =
-            spawn_decoder_thread(path, self.vid_data.clone(), self.renderer.clone());
-
-        *self._decoder_handle.lock() = Some(decoder_handle);
-    }
-
-    #[instrument(target = "ui::video")]
-    async fn redraw(self: Arc<Self>, batch: BatchGuardPtr) {
-        let Some(parent_rect) = self.parent_rect.lock().clone() else {
-            warn!(target: "ui:video", "Skip draw since parent rect is empty");
-            return
-        };
-
-        let atom = &mut batch.spawn();
-        let Some(draw_update) = self.get_draw_calls(atom, parent_rect) else {
-            error!(target: "ui:video", "Video failed to draw");
-            return
-        };
-        self.renderer.replace_draw_calls(Some(batch.id), draw_update.draw_calls);
+        spawn_decoder_thread(path, self.vid_data.clone(), self.renderer.clone());
     }
 
     fn regen_mesh(&self) -> MeshInfo {
@@ -162,15 +156,10 @@ impl Video {
         mesh.alloc(&self.renderer)
     }
 
-    fn get_draw_calls(
-        &self,
-        atom: &mut PropertyAtomicGuard,
-        parent_rect: Rectangle,
-    ) -> Option<DrawUpdate> {
-        self.rect.eval(atom, &parent_rect).ok()?;
-        let rect = self.rect.get();
-        self.uv.eval(atom, &rect).ok()?;
-
+    /// Wire decoder output into the renderer anim and build the video
+    /// instructions. Called only when the draw cache is stale or the
+    /// rect changed; the anim then advances renderer-side.
+    fn make_instrs(&self, rect: &Rectangle) -> Option<Vec<DrawInstruction>> {
         let mesh = self.regen_mesh();
 
         let (vid_data, tsubs) = {
@@ -244,22 +233,11 @@ impl Video {
 
         debug!(target: "ui::video", "Loaded {loaded_n_frames} / {total_frames} frames");
 
-        Some(DrawUpdate {
-            key: self.dc_key,
-            draw_calls: vec![(
-                self.dc_key,
-                DrawCall::new(
-                    vec![
-                        DrawInstruction::SetPipeline(GraphicPipeline::YUV),
-                        DrawInstruction::Move(rect.pos()),
-                        DrawInstruction::Animation(vid_data.anim.clone()),
-                    ],
-                    vec![],
-                    self.z_index.get(),
-                    "vid",
-                ),
-            )],
-        })
+        Some(vec![
+            DrawInstruction::SetPipeline(GraphicPipeline::YUV),
+            DrawInstruction::Move(rect.pos()),
+            DrawInstruction::Animation(vid_data.anim.clone()),
+        ])
     }
 }
 
@@ -270,6 +248,8 @@ impl UIObject for Video {
     }
 
     fn init(&self) {
+        // Drop textures from a dead UI epoch (if any) before reloading
+        *self.vid_data.lock() = None;
         self.load_video();
     }
 
@@ -277,9 +257,18 @@ impl UIObject for Video {
         let me = Arc::downgrade(&self);
 
         let mut on_modify = OnModify::new(ex, self.node.clone(), me.clone());
-        on_modify.when_change(self.rect.prop(), Self::redraw);
-        on_modify.when_change(self.uv.prop(), Self::redraw);
-        on_modify.when_change(self.z_index.prop(), Self::redraw);
+        on_modify.when_change_external(self.rect.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.uv.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
+        on_modify.when_change_external(self.z_index.prop(), |self_, _| async move {
+            self_.draw_cache.clear();
+            self_.redraw.trigger();
+        });
         on_modify.when_change(self.path.prop(), Self::reload);
 
         *self.tasks.lock() = on_modify.tasks;
@@ -289,6 +278,7 @@ impl UIObject for Video {
         self.tasks.lock().clear();
         *self.parent_rect.lock() = None;
         *self.vid_data.lock() = None;
+        self.draw_cache.clear();
         // Threads terminate naturally when channels close
     }
 
@@ -299,15 +289,42 @@ impl UIObject for Video {
         atom: &mut PropertyAtomicGuard,
     ) -> Option<DrawUpdate> {
         *self.parent_rect.lock() = Some(parent_rect);
-        self.get_draw_calls(atom, parent_rect)
+
+        // Rect property is its own memo: compare before/after eval.
+        let prev_rect = self.rect.get();
+        self.rect.eval(atom, &parent_rect).ok()?;
+        let rect = self.rect.get();
+        let rect_changed = rect != prev_rect;
+        self.uv.eval(atom, &rect).ok()?;
+
+        // Compute under the cache lock so a concurrent invalidation lands
+        // before or after, never between. A video that has not loaded
+        // yet stays uncached so the next pass retries.
+        if rect_changed {
+            self.draw_cache.clear();
+        }
+        let instrs = match self.draw_cache.get() {
+            Some(instrs) => instrs,
+            None => {
+                let Some(instrs) = self.make_instrs(&rect) else { return None };
+                self.draw_cache.set(instrs.clone());
+                instrs
+            }
+        };
+
+        Some(DrawUpdate {
+            key: self.dc_key,
+            draw_calls: vec![(
+                self.dc_key,
+                DrawCall::new(instrs, vec![], self.z_index.get(), "vid"),
+            )],
+        })
     }
 }
 
 impl Drop for Video {
     fn drop(&mut self) {
-        let atom = self.renderer.make_guard(gfxtag!("Video::drop"));
-        self.renderer
-            .replace_draw_calls(Some(atom.batch_id), vec![(self.dc_key, Default::default())]);
+        self.renderer.replace_draw_calls(vec![(self.dc_key, Default::default())]);
     }
 }
 

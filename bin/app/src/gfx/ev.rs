@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use miniquad::{KeyCode, KeyMods, MouseButton, TouchPhase};
+use miniquad::{KeyCode, KeyMods, MouseButton};
 use std::sync::Arc;
 
 use super::{Dimension, Point};
@@ -44,6 +44,7 @@ impl<T> EventChannel<T> {
 pub type GraphicsEventPublisherPtr = Arc<GraphicsEventPublisher>;
 
 pub struct GraphicsEventPublisher {
+    screen_changed: EventChannel<bool>,
     resize: EventChannel<Dimension>,
     key_down: EventChannel<(KeyCode, KeyMods, bool)>,
     key_up: EventChannel<(KeyCode, KeyMods)>,
@@ -52,9 +53,9 @@ pub struct GraphicsEventPublisher {
     mouse_btn_up: EventChannel<(MouseButton, Point)>,
     mouse_move: EventChannel<Point>,
     mouse_wheel: EventChannel<Point>,
-    touch: EventChannel<(TouchPhase, u64, Point)>,
 }
 
+pub type GraphicsEventScreenSub = async_channel::Receiver<bool>;
 pub type GraphicsEventResizeSub = async_channel::Receiver<Dimension>;
 pub type GraphicsEventKeyDownSub = async_channel::Receiver<(KeyCode, KeyMods, bool)>;
 pub type GraphicsEventKeyUpSub = async_channel::Receiver<(KeyCode, KeyMods)>;
@@ -63,11 +64,11 @@ pub type GraphicsEventMouseButtonDownSub = async_channel::Receiver<(MouseButton,
 pub type GraphicsEventMouseButtonUpSub = async_channel::Receiver<(MouseButton, Point)>;
 pub type GraphicsEventMouseMoveSub = async_channel::Receiver<Point>;
 pub type GraphicsEventMouseWheelSub = async_channel::Receiver<Point>;
-pub type GraphicsEventTouchSub = async_channel::Receiver<(TouchPhase, u64, Point)>;
 
 impl GraphicsEventPublisher {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            screen_changed: EventChannel::new(),
             resize: EventChannel::new(),
             key_down: EventChannel::new(),
             key_up: EventChannel::new(),
@@ -76,8 +77,11 @@ impl GraphicsEventPublisher {
             mouse_btn_up: EventChannel::new(),
             mouse_move: EventChannel::new(),
             mouse_wheel: EventChannel::new(),
-            touch: EventChannel::new(),
         })
+    }
+
+    pub(super) fn notify_screen_changed(&self, screen_on: bool) {
+        self.screen_changed.notify(screen_on);
     }
 
     pub(super) fn notify_resize(&self, screen_size: Dimension) {
@@ -110,9 +114,8 @@ impl GraphicsEventPublisher {
     pub(super) fn notify_mouse_wheel(&self, wheel_pos: Point) {
         self.mouse_wheel.notify(wheel_pos);
     }
-    pub(super) fn notify_touch(&self, phase: TouchPhase, id: u64, touch_pos: Point) {
-        let ev = (phase, id, touch_pos);
-        self.touch.notify(ev);
+    pub fn subscribe_screen_changed(&self) -> GraphicsEventScreenSub {
+        self.screen_changed.clone_recvr()
     }
 
     pub fn subscribe_resize(&self) -> GraphicsEventResizeSub {
@@ -138,8 +141,5 @@ impl GraphicsEventPublisher {
     }
     pub fn subscribe_mouse_wheel(&self) -> GraphicsEventMouseWheelSub {
         self.mouse_wheel.clone_recvr()
-    }
-    pub fn subscribe_touch(&self) -> GraphicsEventTouchSub {
-        self.touch.clone_recvr()
     }
 }

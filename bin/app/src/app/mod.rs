@@ -16,31 +16,32 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use sled_overlay::sled;
+use kvdb_overlay::Database as KvDb;
 use smol::Task;
-use std::sync::{Arc, Mutex as SyncMutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex as SyncMutex,
+};
 
 #[cfg(target_os = "android")]
 use crate::android;
-
-#[cfg(any(feature = "enable-plugin-darkirc", feature = "enable-plugin-fud"))]
-use crate::plugin::PluginSettings;
 use crate::{
-    error::Error,
-    gfx::{gfxtag, EpochIndex, GraphicsEventPublisherPtr, Renderer},
-    prop::{PropertyAtomicGuard, PropertyValue, Role},
-    scene::{Pimpl, SceneNode, SceneNodePtr, SceneNodeType},
-    ui::Window,
+    db::AppDbPtr,
+    gfx::{EpochIndex, GraphicsEventPublisherPtr, Renderer},
+    prop::{PropertyAtomicGuard, Role},
+    scene::{Pimpl, SceneNodePtr},
+    setting::{create_setting, Setting},
+    sfx,
+    ui::{RedrawTrigger, Window},
     util::i18n::I18nBabelFish,
     ExecutorPtr,
 };
 
 pub mod locale;
 use locale::read_locale_ftl;
-mod node;
+pub mod node;
 use node::create_window;
-mod schema;
-use schema::get_settingsdb_path;
+pub mod schema;
 
 macro_rules! d { ($($arg:tt)*) => { debug!(target: "app", $($arg)*); } }
 macro_rules! t { ($($arg:tt)*) => { trace!(target: "app", $($arg)*); } }
@@ -59,46 +60,58 @@ pub struct App {
     pub renderer: Renderer,
     pub tasks: SyncMutex<Vec<Task<()>>>,
     pub ex: ExecutorPtr,
+    /// Handle for requesting a serialized draw pass from the window's
+    /// draw loop. Passed to `Window::new` (with the receiver) and to
+    /// widget constructors during migration to the draw-pass model.
+    pub redraw_trigger: RedrawTrigger,
+    /// Receiver side of the redraw queue, handed to the window in `setup()`.
+    redraw_rx: async_channel::Receiver<()>,
+    /// True on the first run of a new app version, i.e. when no version
+    /// or a different one is recorded in the app DB. Loaded in `setup()`.
+    pub is_first_time: AtomicBool,
 }
 
 impl App {
     pub fn new(sg_root: SceneNodePtr, renderer: Renderer, ex: ExecutorPtr) -> Arc<Self> {
-        Arc::new(Self { sg_root, ex, renderer, tasks: SyncMutex::new(vec![]) })
+        let (redraw_trigger, redraw_rx) = RedrawTrigger::new();
+        Arc::new(Self {
+            sg_root,
+            ex,
+            renderer,
+            tasks: SyncMutex::new(vec![]),
+            redraw_trigger,
+            redraw_rx,
+            is_first_time: AtomicBool::new(false),
+        })
     }
 
     /// Does not require miniquad to be init. Created the scene graph tree / schema and all
     /// the objects.
-    pub async fn setup(&self) -> Result<Option<i32>, Error> {
+    pub async fn setup(&self, kv_db: KvDb, app_db: AppDbPtr) {
         t!("App::setup()");
 
-        let db_path = get_settingsdb_path();
-        let db = match sled::open(&db_path) {
-            Ok(db) => db,
-            Err(err) => {
-                e!("Sled database '{}' failed to open: {err}!", db_path.display());
-                return Err(Error::SledDbErr)
-            }
-        };
+        let app_version = env!("CARGO_PKG_VERSION");
+        let is_first_time = app_db.app_version_get().await.unwrap().as_deref() != Some(app_version);
+        if is_first_time {
+            i!("First run of app version {app_version}");
+            app_db.app_version_set(app_version).await.unwrap();
+        }
+        self.is_first_time.store(is_first_time, Ordering::Relaxed);
 
-        let setting_root = SceneNode::new("setting", SceneNodeType::SettingRoot);
-        let setting_root = setting_root.setup_null();
-        let settings_tree = db.open_tree("settings").unwrap();
-        // Commenting this out since it doesnt compile when enable-plugins isnt enabled.
-        /*
-        let settings = Arc::new(PluginSettings {
-            setting_root: setting_root.clone(),
-            sled_tree: settings_tree,
-        });
-        */
+        let ex = self.ex.clone();
+        let app_db2 = app_db.clone();
+        let setting = create_setting("setting");
+        let setting = setting.setup(|me| async move { Setting::new(me, app_db2, ex).await }).await;
+        self.sg_root.link(setting);
 
         let i18n_fish = self.setup_locale();
 
         let window = create_window("window");
         #[cfg(target_os = "android")]
         let window_scale = {
-            let screen_density = android::get_screen_density();
+            let screen_density = miniquad::window::dpi_scale();
             i!("Android screen density: {screen_density}");
-            screen_density / 2.8
+            screen_density / 3.5
         };
         #[cfg(not(target_os = "android"))]
         let window_scale = 1.;
@@ -119,30 +132,41 @@ impl App {
         }
         let window = window
             .setup(|me| {
-                Window::new(me, self.renderer.clone(), i18n_fish.clone(), setting_root.clone())
+                Window::new(
+                    me,
+                    self.renderer.clone(),
+                    i18n_fish.clone(),
+                    self.ex.clone(),
+                    self.redraw_trigger.clone(),
+                    self.redraw_rx.clone(),
+                )
             })
             .await;
 
         self.sg_root.link(window.clone());
-        self.sg_root.link(setting_root.clone());
 
         #[cfg(feature = "schema-app")]
-        schema::make(&self, window.clone(), &i18n_fish).await;
+        schema::make(&self, window.clone(), &i18n_fish, kv_db, app_db).await;
 
         #[cfg(feature = "schema-test")]
         schema::test::make(&self, window.clone(), &i18n_fish).await;
 
+        #[cfg(feature = "schema-test-edit")]
+        schema::test_edit::make(&self, window.clone(), &i18n_fish).await;
+
         #[cfg(feature = "schema-test-scroll-layer")]
         schema::test_scroll_layer::make(&self, window.clone(), &i18n_fish).await;
+
+        #[cfg(feature = "schema-test-chatview")]
+        schema::test_chatview::make(&self, window.clone(), &i18n_fish).await;
 
         #[cfg(all(feature = "schema-app", feature = "schema-test"))]
         compile_error!("Only one schema can be selected");
 
-        //settings::make(&self, window, self.ex.clone()).await;
+        #[cfg(all(feature = "schema-app", feature = "schema-test-chatview"))]
+        compile_error!("Only one schema can be selected");
 
         d!("Schema loaded");
-
-        Ok(None)
     }
 
     fn setup_locale(&self) -> I18nBabelFish {
@@ -181,6 +205,13 @@ impl App {
     /// Begins the draw of the tree, and then starts the UI procs.
     pub async fn start(self: Arc<Self>, event_pub: GraphicsEventPublisherPtr, epoch: EpochIndex) {
         d!("Starting app epoch={epoch}");
+        // On Android the foreground service keeps the process alive across
+        // UI restarts, so start() runs on every relaunch. swap() consumes
+        // the flag so the sound only plays on the first launch of a new
+        // app version.
+        if self.is_first_time.swap(false, Ordering::Relaxed) {
+            sfx::play_commup();
+        }
         let mut atom = PropertyAtomicGuard::none();
 
         let window_node = self.sg_root.lookup_node("/window").unwrap();
@@ -194,9 +225,10 @@ impl App {
 
         // Access drawable in window node and call draw()
         self.init();
-        //if epoch == 1 {
-        self.trigger_draw().await;
-        //}
+        // Enqueue a draw pass on the window's serialized draw loop.
+        // The bounded(1) queue buffers this until the listener task in
+        // Window::start() is running, so calling before start is safe.
+        self.redraw_trigger.trigger();
 
         self.start_procs(event_pub).await;
         i!("App started");
@@ -218,33 +250,11 @@ impl App {
         }
     }
 
-    async fn trigger_draw(&self) {
-        let atom = &mut self.renderer.make_guard(gfxtag!("App::trigger_draw"));
-        let window_node = self.sg_root.lookup_node("/window").expect("no window attached!");
-        match window_node.pimpl() {
-            Pimpl::Window(win) => win.draw(atom).await,
-            _ => panic!("wrong pimpl"),
-        }
-    }
     async fn start_procs(&self, event_pub: GraphicsEventPublisherPtr) {
         let window_node = self.sg_root.lookup_node("/window").unwrap();
         match window_node.pimpl() {
             Pimpl::Window(win) => win.clone().start(event_pub, self.ex.clone()).await,
             _ => panic!("wrong pimpl"),
         }
-    }
-
-    pub fn notify_start(&self) {
-        let window = self.sg_root.lookup_node("/window").unwrap();
-        smol::block_on(async {
-            window.trigger("start", vec![]).await.unwrap();
-        });
-    }
-
-    pub fn notify_stop(&self) {
-        let window = self.sg_root.lookup_node("/window").unwrap();
-        smol::block_on(async {
-            window.trigger("stop", vec![]).await.unwrap();
-        });
     }
 }

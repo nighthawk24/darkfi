@@ -17,6 +17,8 @@
  */
 
 pub mod error;
+pub mod genesis_commits;
 pub mod month_tasks;
+pub mod rln;
 pub mod task_info;
 pub mod util;

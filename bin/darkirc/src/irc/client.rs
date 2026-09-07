@@ -32,7 +32,7 @@ use darkfi::{
 };
 use darkfi_serial::{deserialize_async_partial, serialize_async};
 use futures::{FutureExt, StreamExt};
-use sled_overlay::sled;
+use kvdb_overlay::{Batch, Tree};
 use smol::{
     io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     lock::{OnceCell, RwLock},
@@ -179,7 +179,7 @@ pub struct Client {
     pub caps: RwLock<HashMap<String, bool>>,
     /// Set of seen messages for the user
     /// TODO: It grows indefinitely, needs to be pruned.
-    pub seen: OnceCell<sled::Tree>,
+    pub seen: OnceCell<Tree>,
     /// NickServ instance
     pub nickserv: Arc<NickServ>,
 }
@@ -332,13 +332,19 @@ impl Client {
                     }
 
                     // Try to deserialize the `Event`'s content into a `Privmsg`
-                    let mut privmsg = match deserialize_async_partial(r.content()).await {
+                    let mut privmsg: Privmsg = match deserialize_async_partial(r.content()).await {
                         Ok((v, _)) => v,
                         Err(e) => {
                             error!(target: "irc::client", "[IRC CLIENT] Failed deserializing event: {e}");
                             continue
                         }
                     };
+
+                    // Record any public (`#`-prefixed) channel observed on the
+                    // wire. Done before decryption so that only truly public
+                    // channels (plaintext channel field) are recorded; encrypted
+                    // channels carry base58 ciphertext in this field.
+                    self.server.record_seen_channel(&privmsg.channel).await?;
 
                     // If successful, potentially decrypt it:
                     self.server.try_decrypt(&mut privmsg, self.nickname.read().await.as_ref()).await;
@@ -674,6 +680,10 @@ impl Client {
 
     // Internal helper function that creates an Event from PRIVMSG arguments
     async fn privmsg_to_event(&self, mut privmsg: Privmsg) -> Result<Event> {
+        // Record the outbound channel before encryption so that any public
+        // (`#`-prefixed) channel we send to is reflected in `/LIST`.
+        self.server.record_seen_channel(&privmsg.channel).await?;
+
         // Encrypt the Privmsg if an encryption method is available.
         self.server.try_encrypt(&mut privmsg).await;
 
@@ -683,31 +693,31 @@ impl Client {
 
     /// Atomically mark a message as seen for this client.
     pub async fn mark_seen(&self, event_id: &blake3::Hash) -> Result<()> {
-        let db = self
+        let tree = self
             .seen
             .get_or_init(|| async {
                 let u = self.username.read().await.to_string();
-                self.server.darkirc.sled.open_tree(format!("darkirc_user_{u}")).unwrap()
+                self.server.darkirc.kvdb.open_tree_default(&format!("darkirc_user_{u}")).unwrap()
             })
             .await;
 
         debug!("Marking event {event_id} as seen");
-        let mut batch = sled::Batch::default();
+        let mut batch = Batch::default();
         batch.insert(event_id.as_bytes(), &[]);
-        Ok(db.apply_batch(batch)?)
+        Ok(self.server.darkirc.kvdb.atomic_write(&[(tree, &batch)])?)
     }
 
     /// Check if a message was already marked seen for this client.
     pub async fn is_seen(&self, event_id: &blake3::Hash) -> Result<bool> {
-        let db = self
+        let tree = self
             .seen
             .get_or_init(|| async {
                 let u = self.username.read().await.to_string();
-                self.server.darkirc.sled.open_tree(format!("darkirc_user_{u}")).unwrap()
+                self.server.darkirc.kvdb.open_tree_default(&format!("darkirc_user_{u}")).unwrap()
             })
             .await;
 
-        Ok(db.contains_key(event_id.as_bytes())?)
+        Ok(tree.contains_key(event_id.as_bytes())?)
     }
 }
 

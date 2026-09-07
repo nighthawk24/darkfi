@@ -25,7 +25,7 @@ use crate::{
         App,
     },
     expr,
-    gfx::gfxtag,
+    gfx::{gfxtag, Point},
     mesh::{COLOR_CYAN, COLOR_TEAL},
     prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, Role},
     scene::{SceneNodePtr, Slot},
@@ -65,13 +65,179 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
     main_layer.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     main_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-    let main_layer = main_layer.setup(|me| Layer::new(me, app.renderer.clone())).await;
+    let main_layer = main_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     wallet_layer.link(main_layer.clone());
 
     let main_is_visible = PropertyBool::wrap(&main_layer, Role::App, "is_visible", 0).unwrap();
 
     create_bg_mesh(app, atom, &main_layer, "wallet_bg").await;
     create_header_bg(app, atom, &main_layer, "wallet_header_bg").await;
+
+    // Back arrow
+    let node = create_vector_art("wallet_back_btn_bg");
+    let prop = node.get_property("rect").unwrap();
+    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
+    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
+    prop.set_f32(atom, Role::App, 2, BACKARROW_BG_W + BACK_SEP_W).unwrap();
+    prop.set_f32(atom, Role::App, 3, HEADER_HEIGHT).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+    node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
+    let mut shape = VectorShape::new();
+    let (_bg_color, sep_color) = match COLOR_SCHEME {
+        ColorScheme::DarkMode => ([0., 0., 0., 1.], [0.41, 0.6, 0.65, 1.]),
+        ColorScheme::PaperLight => ([1., 1., 1., 1.], [0., 0.6, 0.65, 1.]),
+    };
+    shape.add_filled_box(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::const_f32(BACKARROW_BG_W),
+        expr::load_var("h"),
+        [0.0, 0.106, 0.114, 1.0],
+    );
+    shape.add_filled_box(
+        expr::const_f32(BACKARROW_BG_W),
+        expr::const_f32(0.),
+        expr::const_f32(BACKARROW_BG_W + BACK_SEP_W),
+        expr::load_var("h"),
+        sep_color,
+    );
+    shape.join(
+        shape::create_back_arrow()
+            .scaled(BACKARROW_SCALE)
+            .offset(Point::new(BACKARROW_X, BACKARROW_Y)),
+    );
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    wallet_layer.link(node.clone());
+    let back_bg_is_visible = PropertyBool::wrap(&node, Role::App, "is_visible", 0).unwrap();
+
+    // Back button
+    let node = create_button("wallet_back_btn");
+    node.set_property_bool(atom, Role::App, "is_active", false).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 10).unwrap();
+    node.set_property_u32(atom, Role::App, "priority", 10).unwrap();
+    let prop = node.get_property("rect").unwrap();
+    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
+    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
+    prop.set_f32(atom, Role::App, 2, BACKARROW_BG_W).unwrap();
+    prop.set_f32(atom, Role::App, 3, HEADER_HEIGHT).unwrap();
+
+    let redraw = app.redraw_trigger.clone();
+    let sg_root = app.sg_root.clone();
+    let main_is_visible1 = main_is_visible.clone();
+    let (slot, recvr) = Slot::new("wallet_back_clicked");
+    node.register("click", slot).unwrap();
+    let listen_click = app.ex.spawn(async move {
+        while recvr.recv().await.is_ok() {
+            let atom = &mut redraw.make_guard(gfxtag!("wallet back button"));
+            let tx_status_is_visible = PropertyBool::wrap(
+                &sg_root.lookup_node("/window/content/wallet/tx_status_layer").unwrap(),
+                Role::App,
+                "is_visible",
+                0,
+            )
+            .unwrap();
+            let step4_is_visible = PropertyBool::wrap(
+                &sg_root.lookup_node("/window/content/wallet/send_step4_layer").unwrap(),
+                Role::App,
+                "is_visible",
+                0,
+            )
+            .unwrap();
+            let step3_is_visible = PropertyBool::wrap(
+                &sg_root.lookup_node("/window/content/wallet/send_step3_layer").unwrap(),
+                Role::App,
+                "is_visible",
+                0,
+            )
+            .unwrap();
+            let step2_is_visible = PropertyBool::wrap(
+                &sg_root.lookup_node("/window/content/wallet/send_step2_layer").unwrap(),
+                Role::App,
+                "is_visible",
+                0,
+            )
+            .unwrap();
+            let step1_is_visible = PropertyBool::wrap(
+                &sg_root.lookup_node("/window/content/wallet/send_step1_layer").unwrap(),
+                Role::App,
+                "is_visible",
+                0,
+            )
+            .unwrap();
+            let receive_is_visible = PropertyBool::wrap(
+                &sg_root.lookup_node("/window/content/wallet/receive_layer").unwrap(),
+                Role::App,
+                "is_visible",
+                0,
+            )
+            .unwrap();
+
+            if tx_status_is_visible.get() {
+                tx_status_is_visible.set(atom, false);
+                main_is_visible1.set(atom, true);
+                continue
+            }
+
+            if step4_is_visible.get() {
+                step4_is_visible.set(atom, false);
+                step3_is_visible.set(atom, true);
+                continue
+            }
+
+            if step3_is_visible.get() {
+                if let Some(error_node) =
+                    sg_root.lookup_node("/window/content/wallet/send_step3_layer/error")
+                {
+                    error_node.set_property_str(atom, Role::App, "text", "").unwrap();
+                }
+                step3_is_visible.set(atom, false);
+                step2_is_visible.set(atom, true);
+                continue
+            }
+
+            if step2_is_visible.get() {
+                step2_is_visible.set(atom, false);
+                step1_is_visible.set(atom, true);
+                continue
+            }
+
+            if step1_is_visible.get() {
+                step1_is_visible.set(atom, false);
+                main_is_visible1.set(atom, true);
+                continue
+            }
+
+            if receive_is_visible.get() {
+                receive_is_visible.set(atom, false);
+                main_is_visible1.set(atom, true);
+            }
+        }
+    });
+    app.tasks.lock().unwrap().push(listen_click);
+
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    wallet_layer.link(node.clone());
+    let back_btn_is_active = PropertyBool::wrap(&node, Role::App, "is_active", 0).unwrap();
+
+    // Show the back button whenever the main wallet screen is hidden
+    let redraw = app.redraw_trigger.clone();
+    let main_is_visible2 = main_is_visible.clone();
+    let main_is_visible_sub = main_is_visible.prop().subscribe_modify();
+    let listen_main_visible = app.ex.spawn(async move {
+        while let Ok(_) = main_is_visible_sub.receive().await {
+            let atom = &mut redraw.make_guard(gfxtag!("wallet back button visibility"));
+            let visible = !main_is_visible2.get();
+            back_bg_is_visible.set(atom, visible);
+            back_btn_is_active.set(atom, visible);
+        }
+    });
+    app.tasks.lock().unwrap().push(listen_main_visible);
+
     create_chat_btn(app, atom, &cc, &main_layer).await;
 
     let mut y = HEADER_HEIGHT;
@@ -99,13 +265,29 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     main_layer.link(node);
 
     y += TITLE_PADDING * 2. + TITLE_FONTSIZE + 1.;
 
-    create_separator(&app.renderer, atom, &main_layer, "wallet_balance_separator", &mut y).await;
+    create_separator(
+        &app.renderer,
+        &app.redraw_trigger,
+        atom,
+        &main_layer,
+        "wallet_balance_separator",
+        &mut y,
+    )
+    .await;
 
     // Receive button bg
     let node = create_vector_art("receive_btn_bg");
@@ -125,7 +307,9 @@ pub async fn make(
         1.,
         COLOR_TEAL,
     );
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     main_layer.link(node);
 
     // Receive button click handler
@@ -138,14 +322,14 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 2, code).unwrap();
     prop.set_f32(atom, Role::App, 3, BUTTON_HEIGHT).unwrap();
 
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let main_is_visible2 = main_is_visible.clone();
     let sg_root = app.sg_root.clone();
     let (slot, recvr) = Slot::new("receive_clicked");
     node.register("click", slot).unwrap();
     let listen_click = app.ex.spawn(async move {
         while recvr.recv().await.is_ok() {
-            let atom = &mut renderer.make_guard(gfxtag!("receive button click"));
+            let atom = &mut redraw.make_guard(gfxtag!("receive button click"));
             main_is_visible2.set(atom, false);
 
             let receive_layer =
@@ -180,7 +364,8 @@ pub async fn make(
     });
     app.tasks.lock().unwrap().push(listen_click);
 
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     main_layer.link(node);
 
     // Receive label
@@ -209,7 +394,15 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     main_layer.link(node);
 
@@ -232,7 +425,9 @@ pub async fn make(
         1.,
         COLOR_TEAL,
     );
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     main_layer.link(node);
 
     // Send button click handler
@@ -246,14 +441,14 @@ pub async fn make(
     prop.set_expr(atom, Role::App, 2, code).unwrap();
     prop.set_f32(atom, Role::App, 3, BUTTON_HEIGHT).unwrap();
 
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let sg_root = app.sg_root.clone();
     let main_is_visible3 = main_is_visible.clone();
     let (slot, recvr) = Slot::new("send_clicked");
     node.register("click", slot).unwrap();
     let listen_click = app.ex.spawn(async move {
         while let Ok(_) = recvr.recv().await {
-            let atom = &mut renderer.make_guard(gfxtag!("send button click"));
+            let atom = &mut redraw.make_guard(gfxtag!("send button click"));
             main_is_visible3.set(atom, false);
             let send_layer =
                 sg_root.lookup_node("/window/content/wallet/send_step1_layer").unwrap();
@@ -262,7 +457,8 @@ pub async fn make(
     });
     app.tasks.lock().unwrap().push(listen_click);
 
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     main_layer.link(node);
 
     // Send label
@@ -292,13 +488,29 @@ pub async fn make(
     }
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
     let node = node
-        .setup(|me| Text::new(me, window_scale.clone(), app.renderer.clone(), i18n_fish.clone()))
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
         .await;
     main_layer.link(node);
 
     y += PADDING_X * 2. + BUTTON_HEIGHT + 1.;
 
-    create_separator(&app.renderer, atom, &main_layer, "wallet_buttons_separator", &mut y).await;
+    create_separator(
+        &app.renderer,
+        &app.redraw_trigger,
+        atom,
+        &main_layer,
+        "wallet_buttons_separator",
+        &mut y,
+    )
+    .await;
 
     create_title(app, atom, &main_layer, &window_scale, i18n_fish, "TOKENS", &mut y).await;
 
@@ -338,7 +550,9 @@ pub async fn make(
     prop.set_f32(atom, Role::App, 2, 0.2784).unwrap();
     prop.set_f32(atom, Role::App, 3, 1.).unwrap();
 
-    let tokens_table = tokens_table.setup(|me| TokenTable::new(me, app.renderer.clone())).await;
+    let tokens_table = tokens_table
+        .setup(|me| TokenTable::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
     main_layer.link(tokens_table.clone());
 
     main_layer
@@ -376,7 +590,9 @@ async fn create_chat_btn(
         1.,
         [0.2, 0.2745, 0.2784, 1.],
     );
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     parent.link(node);
 
     let node = create_vector_art("chat_btn_shape");
@@ -392,11 +608,16 @@ async fn create_chat_btn(
     let mut shape = shape::create_netlogo1([0., 0.94, 1., 1.]);
     shape.join(shape::create_netlogo2([0., 0.94, 1., 1.]));
     shape.join(shape::create_netlogo3([0., 0.94, 1., 1.]));
-    let node = node.setup(|me| VectorArt::new(me, shape, app.renderer.clone())).await;
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     parent.link(node);
 
     let node = create_button("chat_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
+    // The button floats above the tokens table (priority 0), whose
+    // rect spans the rest of the layer — it must be hit-tested first.
+    node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
     let prop = node.get_property("rect").unwrap();
     let code = cc.compile(format!("w - {CHAT_BTN_SIZE} - {CHAT_BTN_MARGIN}")).unwrap();
     prop.set_expr(atom, Role::App, 0, code).unwrap();
@@ -406,9 +627,9 @@ async fn create_chat_btn(
     prop.set_f32(atom, Role::App, 3, CHAT_BTN_SIZE).unwrap();
 
     let sg_root = app.sg_root.clone();
-    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
     let menu_is_visible = PropertyBool::wrap(
-        &sg_root.lookup_node("/window/content/menu_layer").unwrap(),
+        &sg_root.lookup_node("/window/content/chat").unwrap(),
         Role::App,
         "is_visible",
         0,
@@ -426,13 +647,14 @@ async fn create_chat_btn(
     let listen_click = app.ex.spawn(async move {
         while let Ok(_) = recvr.recv().await {
             info!(target: "app::wallet", "clicked back from wallet");
-            let atom = &mut renderer.make_guard(gfxtag!("wallet goback action"));
+            let atom = &mut redraw.make_guard(gfxtag!("wallet goback action"));
             wallet_is_visible.set(atom, false);
             menu_is_visible.set(atom, true);
         }
     });
     app.tasks.lock().unwrap().push(listen_click);
 
-    let node = node.setup(|me| Button::new(me, app.renderer.clone())).await;
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     parent.link(node);
 }
