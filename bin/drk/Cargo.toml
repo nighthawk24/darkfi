@@ -31,7 +31,6 @@ libc = "0.2"
 num-bigint = "0.4.6"
 prettytable-rs = "0.10.0"
 rand = "0.8.6"
-rodio = { git = "https://github.com/RustAudio/rodio", default-features = false, features = ["playback", "mp3"] }
 toml = "0.9.8"
 tracing = "0.1.44"
 turso = "0.7.0-pre.14"
@@ -55,6 +54,10 @@ structopt-toml = "0.5.1"
 signal-hook-async-std = "0.4.0"
 signal-hook = "0.4.4"
 linenoise-rs = "0.1.1"
+
+# CLI-only audio (kaching). Skip on mobile so UniFFI does not link rodio/cpal.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rodio = { git = "https://github.com/RustAudio/rodio", default-features = false, features = ["playback", "mp3"] }
 
 [lints]
 workspace = true

@@ -62,7 +62,8 @@ serde = {version = "1.0.228", features = ["derive"]}
 structopt = "0.3.26"
 structopt-toml = "0.5.1"
 
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
+# jemalloc configure rejects aarch64-apple-ios-sim; use the system allocator on iOS.
+[target.'cfg(all(not(target_env = "msvc"), not(target_os = "ios")))'.dependencies]
 tikv-jemallocator = "0.5.4"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]

@@ -23,6 +23,7 @@ use std::{
     str::FromStr,
 };
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use rodio::{Decoder, DeviceSinkBuilder, Player};
 use smol::{channel::Sender, fs::read_to_string};
 use structopt_toml::{
@@ -226,16 +227,23 @@ pub async fn parse_token_pair(drk: &Drk, s: &str) -> Result<(TokenId, TokenId)> 
 
 /// Fun police go away
 pub async fn kaching() {
-    const WALLET_MP3: &[u8] = include_bytes!("../wallet.mp3");
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        return;
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        const WALLET_MP3: &[u8] = include_bytes!("../wallet.mp3");
 
-    let cursor = Cursor::new(WALLET_MP3);
+        let cursor = Cursor::new(WALLET_MP3);
 
-    let Ok(stream_handle) = DeviceSinkBuilder::open_default_sink() else { return };
-    let sink = Player::connect_new(stream_handle.mixer());
+        let Ok(stream_handle) = DeviceSinkBuilder::open_default_sink() else { return };
+        let sink = Player::connect_new(stream_handle.mixer());
 
-    let Ok(source) = Decoder::new(cursor) else { return };
-    sink.append(source);
-    sink.detach();
+        let Ok(source) = Decoder::new(cursor) else { return };
+        sink.append(source);
+        sink.detach();
+    }
 }
 
 /// Auxiliary function to generate provided shell completions.
