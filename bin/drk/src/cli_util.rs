@@ -18,7 +18,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{stdin, Cursor, Read},
+    io::{stdin, Read},
     slice,
     str::FromStr,
 };
@@ -233,6 +233,8 @@ pub async fn kaching() {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        use std::io::Cursor;
+
         const WALLET_MP3: &[u8] = include_bytes!("../wallet.mp3");
 
         let cursor = Cursor::new(WALLET_MP3);
