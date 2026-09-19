@@ -25,7 +25,7 @@ use lazy_static::lazy_static;
 use rand::rngs::OsRng;
 
 use darkfi::{
-    tx::{ContractCallLeaf, Transaction, TransactionBuilder},
+    tx::{ContractCallIter, ContractCallLeaf, Transaction, TransactionBuilder},
     util::encoding::base64,
     zk::{halo2::Field, proof::ProvingKey, vm::ZkCircuit, vm_heap::empty_witnesses, Proof},
     zkas::ZkBinary,
@@ -57,7 +57,9 @@ use darkfi_sdk::{
     pasta::pallas,
     ContractCall,
 };
-use darkfi_serial::{deserialize, deserialize_async, serialize, serialize_async, AsyncEncodable};
+use darkfi_serial::{
+    deserialize, deserialize_async, serialize, serialize_async, AsyncEncodable, Encodable,
+};
 
 use crate::{
     cache::CacheSmt,
@@ -1422,21 +1424,35 @@ impl Drk {
             }
         }
 
-        // Knowing the total gas, we can now find an OwnCoin of enough value
-        // so that we can create a valid Money::Fee call.
-        let mut available_coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
-        available_coins
-            .retain(|x| x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier()));
-        if available_coins.is_empty() {
-            return Err(Error::Custom("Not enough native tokens to pay for fees".to_string()))
-        }
-
-        let money_merkle_tree = self.get_money_tree().await?;
-        let coin = &available_coins[0];
+        // Find tx-local output or fallback to other coins
+        let wallet_secrets = self.get_money_secrets().await?;
+        let (coin, money_merkle_tree, is_tx_local) = match self
+            .mark_tx_local_output_for_fee(
+                tx_builder,
+                &wallet_secrets,
+                &spent_nullifiers,
+                required_fee,
+            )
+            .await
+        {
+            Some((coin, tree)) => (coin, tree, true),
+            None => {
+                let mut coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
+                coins.retain(|x| {
+                    x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier())
+                });
+                if coins.is_empty() {
+                    return Err(Error::Custom(
+                        "Not enough native tokens to pay for fees".to_string(),
+                    ));
+                }
+                (coins[0].clone(), self.get_money_tree().await?, false)
+            }
+        };
 
         // Generate fee call data
         let (fee_call, fee_proofs, signature_secret) =
-            self.generate_fee_call(required_fee, coin, &money_merkle_tree, false).await?;
+            self.generate_fee_call(required_fee, &coin, &money_merkle_tree, is_tx_local).await?;
 
         // Append the fee call
         tx_builder
@@ -1464,22 +1480,31 @@ impl Drk {
             }
         }
 
-        // Knowing the total gas, we can now find an OwnCoin of enough value
-        // so that we can create a valid Money::Fee call.
-        let mut available_coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
-        available_coins
-            .retain(|x| x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier()));
-        if available_coins.is_empty() {
-            return Err(Error::Custom("Not enough native tokens to pay for fees".to_string()))
-        }
-
-        let tree = self.get_money_tree().await?;
-        let coin = &available_coins[0];
+        // Find tx-local output or fallback to other coins
+        let wallet_secrets = self.get_money_secrets().await?;
+        let (coin, tree, is_tx_local) = match self
+            .mark_tx_local_output_for_fee(tx, &wallet_secrets, &spent_nullifiers, required_fee)
+            .await
+        {
+            Some((coin, tree)) => (coin, tree, true),
+            None => {
+                let mut coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
+                coins.retain(|x| {
+                    x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier())
+                });
+                if coins.is_empty() {
+                    return Err(Error::Custom(
+                        "Not enough native tokens to pay for fees".to_string(),
+                    ));
+                }
+                (coins[0].clone(), self.get_money_tree().await?, false)
+            }
+        };
 
         // We first have to execute the fee-less tx to gather its used gas, and then we feed
         // it into the fee-creating function.
         let (fee_call, fee_proofs, signature_secret) =
-            self.generate_fee_call(required_fee, coin, &tree, false).await?;
+            self.generate_fee_call(required_fee, &coin, &tree, is_tx_local).await?;
 
         // Append the fee call to the transaction
         tx.calls.push(DarkLeaf { data: fee_call, parent_index: None, children_indexes: vec![] });
@@ -1490,5 +1515,88 @@ impl Drk {
         tx.signatures.push(fee_sigs);
 
         Ok(())
+    }
+
+    /// Helper function to find and mark a tx-local output for fee payment
+    async fn mark_tx_local_output_for_fee(
+        &self,
+        tx_data: &mut impl ContractCallIter,
+        wallet_secrets: &[SecretKey],
+        spent_nullifiers: &[Nullifier],
+        required_fee: u64,
+    ) -> Option<(OwnCoin, MerkleTree)> {
+        let mut tree = MerkleTree::new(1);
+        tree.append(MerkleNode::from(pallas::Base::ZERO));
+
+        for call in tx_data.call_iter_mut() {
+            // Skip non-money transfer calls
+            if !call.is_money_transfer() {
+                continue
+            }
+
+            let Ok(mut params) = deserialize::<MoneyTransferParamsV1>(&call.data[1..]) else {
+                continue
+            };
+
+            // Find a suitable output
+            let found = params.outputs.iter().enumerate().find_map(|(idx, output)| {
+                for secret in wallet_secrets {
+                    let Ok(note) = output.note.decrypt::<MoneyNote>(secret) else { continue };
+
+                    // An output is suitable if:
+                    // - its token is the native token
+                    // - its value is >= the required fee
+                    // - it is not already spent in this transaction
+                    let is_suitable = note.token_id == *DARK_TOKEN_ID &&
+                        note.value >= required_fee &&
+                        !spent_nullifiers.contains(&Nullifier::from(poseidon_hash([
+                            secret.inner(),
+                            output.coin.inner(),
+                        ])));
+
+                    if is_suitable {
+                        return Some((idx, *secret, note, output.coin))
+                    }
+                }
+                None
+            });
+
+            // Mark the suitable output as tx-local
+            if let Some((idx, ..)) = &found {
+                params.outputs[*idx].tx_local = true;
+            }
+            let fee_idx = found.as_ref().map(|(idx, ..)| *idx);
+
+            // Build the tx-local tree
+            let mut position = None;
+            for (i, output) in params.outputs.iter().enumerate() {
+                if !output.tx_local {
+                    continue
+                }
+
+                tree.append(MerkleNode::from(output.coin.inner()));
+
+                if Some(i) == fee_idx {
+                    position = Some(tree.mark().unwrap());
+                }
+            }
+
+            let Some((_, secret, note, coin)) = found else {
+                // No suitable output in this call
+                continue
+            };
+            let position = position.unwrap();
+
+            // Update the call data
+            let mut data = vec![MoneyFunction::TransferV1 as u8];
+            if params.encode(&mut data).is_err() {
+                return None
+            }
+            call.data = data;
+
+            return Some((OwnCoin { coin, note, secret, leaf_position: position }, tree));
+        }
+
+        None
     }
 }
