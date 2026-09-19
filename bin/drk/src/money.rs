@@ -25,7 +25,7 @@ use lazy_static::lazy_static;
 use rand::rngs::OsRng;
 
 use darkfi::{
-    tx::Transaction,
+    tx::{ContractCallLeaf, Transaction, TransactionBuilder},
     util::encoding::base64,
     zk::{halo2::Field, proof::ProvingKey, vm::ZkCircuit, vm_heap::empty_witnesses, Proof},
     zkas::ZkBinary,
@@ -1253,36 +1253,27 @@ impl Drk {
         Ok(TokenId::from_str(input.as_str())?)
     }
 
-    /// Create and append a `Money::Fee` call to a given [`Transaction`].
-    ///
-    /// Optionally takes a set of spent coins in order not to reuse them here.
-    ///
-    /// Returns the `Fee` call, and all necessary data and parameters related.
-    pub async fn append_fee_call(
+    /// Generate fee call components for a transaction.
+    /// Returns (fee_call, fee_proofs, fee_secret) for the given required fee.
+    async fn generate_fee_call(
         &self,
-        tx: &Transaction,
+        required_fee: u64,
+        coin: &OwnCoin,
         money_merkle_tree: &MerkleTree,
-        fee_pk: &ProvingKey,
-        fee_zkbin: &ZkBinary,
-        spent_coins: Option<&[OwnCoin]>,
-    ) -> Result<(ContractCall, Vec<Proof>, Vec<SecretKey>)> {
-        // First we verify the fee-less transaction to see how much fee it requires for execution
-        // and verification.
-        let required_fee = compute_fee(&FEE_CALL_GAS) + self.get_tx_fee(tx, false).await?;
-
-        // Knowing the total gas, we can now find an OwnCoin of enough value
-        // so that we can create a valid Money::Fee call.
-        let mut available_coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
-        available_coins.retain(|x| x.note.value > required_fee);
-        if let Some(spent_coins) = spent_coins {
-            available_coins.retain(|x| !spent_coins.contains(x));
-        }
-        if available_coins.is_empty() {
-            return Err(Error::Custom("Not enough native tokens to pay for fees".to_string()))
-        }
-
-        let coin = &available_coins[0];
+        is_tx_local: bool,
+    ) -> Result<(ContractCall, Vec<Proof>, SecretKey)> {
         let change_value = coin.note.value - required_fee;
+
+        // Build fee circuit
+        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
+        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
+        else {
+            return Err(Error::Custom("Fee circuit not found".to_string()))
+        };
+
+        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
+        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
+        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
 
         // Input and output setup
         let input = FeeCallInput {
@@ -1310,9 +1301,9 @@ impl Drk {
         let signature_secret = SecretKey::random(&mut OsRng);
 
         // Create the actual fee proof
-        let (proof, public_inputs) = create_fee_proof(
-            fee_zkbin,
-            fee_pk,
+        let (fee_proof, public_inputs) = create_fee_proof(
+            &fee_zkbin,
+            &fee_pk,
             &input,
             input_value_blind,
             &output,
@@ -1346,7 +1337,7 @@ impl Drk {
                 merkle_root: public_inputs.merkle_root,
                 user_data_enc: public_inputs.input_user_data_enc,
                 signature_public: public_inputs.signature_public,
-                tx_local: false,
+                tx_local: is_tx_local,
             },
             output: Output {
                 value_commit: public_inputs.output_value_commit,
@@ -1363,68 +1354,99 @@ impl Drk {
         let mut data = vec![MoneyFunction::FeeV1 as u8];
         required_fee.encode_async(&mut data).await?;
         params.encode_async(&mut data).await?;
-        let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
+        let fee_call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
 
-        Ok((call, vec![proof], vec![signature_secret]))
+        Ok((fee_call, vec![fee_proof], signature_secret))
+    }
+
+    /// Create and append a `Money::Fee` call to a given [`TransactionBuilder`].
+    pub async fn append_fee_call(&self, tx_builder: &mut TransactionBuilder) -> Result<()> {
+        let tx = tx_builder.build_signed()?; // Need a signed tx for self.get_tx_fee() to work
+
+        // First we verify the fee-less transaction to see how much fee it requires for execution
+        // and verification.
+        let required_fee = compute_fee(&FEE_CALL_GAS) + self.get_tx_fee(&tx, false).await?;
+
+        // Grab spent coins nullifiers of the transactions and check no other fee call exists
+        let mut spent_nullifiers = vec![];
+        for call in &tx.calls {
+            if call.data.is_money_fee() {
+                return Err(Error::Custom("Fee call already exists".to_string()))
+            }
+
+            if call.data.contract_id == *MONEY_CONTRACT_ID {
+                if let Ok(nullifiers) = money_call_nullifiers(&call.data).await {
+                    spent_nullifiers.extend(nullifiers);
+                }
+            }
+        }
+
+        // Knowing the total gas, we can now find an OwnCoin of enough value
+        // so that we can create a valid Money::Fee call.
+        let mut available_coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
+        available_coins
+            .retain(|x| x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier()));
+        if available_coins.is_empty() {
+            return Err(Error::Custom("Not enough native tokens to pay for fees".to_string()))
+        }
+
+        let money_merkle_tree = self.get_money_tree().await?;
+        let coin = &available_coins[0];
+
+        // Generate fee call data
+        let (fee_call, fee_proofs, signature_secret) =
+            self.generate_fee_call(required_fee, coin, &money_merkle_tree, false).await?;
+
+        // Append the fee call
+        tx_builder
+            .append(ContractCallLeaf::new(fee_call, fee_proofs, vec![signature_secret]), vec![])?;
+
+        Ok(())
     }
 
     /// Create and attach the fee call to given transaction.
     pub async fn attach_fee(&self, tx: &mut Transaction) -> Result<()> {
+        // Calculate required fee using the existing (signed) transaction
+        let required_fee = compute_fee(&FEE_CALL_GAS) + self.get_tx_fee(tx, false).await?;
+
         // Grab spent coins nullifiers of the transactions and check no other fee call exists
-        let mut tx_nullifiers = vec![];
+        let mut spent_nullifiers = vec![];
         for call in &tx.calls {
-            if call.data.contract_id != *MONEY_CONTRACT_ID {
-                continue
+            if call.data.is_money_fee() {
+                return Err(Error::Custom("Fee call already exists".to_string()))
             }
 
-            match MoneyFunction::try_from(call.data.data[0])? {
-                MoneyFunction::FeeV1 => {
-                    return Err(Error::Custom("Fee call already exists".to_string()))
+            if call.data.contract_id == *MONEY_CONTRACT_ID {
+                if let Ok(nullifiers) = money_call_nullifiers(&call.data).await {
+                    spent_nullifiers.extend(nullifiers);
                 }
-                _ => { /* Do nothing */ }
-            }
-
-            let nullifiers = money_call_nullifiers(&call.data).await?;
-            tx_nullifiers.extend_from_slice(&nullifiers);
-        }
-
-        // Grab all native owncoins to check if any is spent
-        let mut spent_coins = vec![];
-        let available_coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
-        for coin in available_coins {
-            if tx_nullifiers.contains(&coin.nullifier()) {
-                spent_coins.push(coin);
             }
         }
 
-        // Now we need to do a lookup for the zkas proof bincodes, and create
-        // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
+        // Knowing the total gas, we can now find an OwnCoin of enough value
+        // so that we can create a valid Money::Fee call.
+        let mut available_coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
+        available_coins
+            .retain(|x| x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier()));
+        if available_coins.is_empty() {
+            return Err(Error::Custom("Not enough native tokens to pay for fees".to_string()))
+        }
 
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("Fee circuit not found".to_string()))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuits proving keys
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
+        let tree = self.get_money_tree().await?;
+        let coin = &available_coins[0];
 
         // We first have to execute the fee-less tx to gather its used gas, and then we feed
         // it into the fee-creating function.
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(tx, &tree, &fee_pk, &fee_zkbin, Some(&spent_coins)).await?;
+        let (fee_call, fee_proofs, signature_secret) =
+            self.generate_fee_call(required_fee, coin, &tree, false).await?;
 
         // Append the fee call to the transaction
         tx.calls.push(DarkLeaf { data: fee_call, parent_index: None, children_indexes: vec![] });
         tx.proofs.push(fee_proofs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
+
+        // Create signature for the fee call
+        let fee_sigs = tx.create_sigs(&[signature_secret])?;
+        tx.signatures.push(fee_sigs);
 
         Ok(())
     }

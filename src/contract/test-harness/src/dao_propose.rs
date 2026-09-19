@@ -157,33 +157,21 @@ impl TestHarness {
         let mut data = vec![DaoFunction::Propose as u8];
         params.encode(&mut data)?;
         let call = ContractCall { contract_id: *DAO_CONTRACT_ID, data };
-        let mut tx_builder = TransactionBuilder::new(ContractCallLeaf { call, proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, proofs, signature_secrets),
+            vec![],
+        )?;
 
         // If fees are enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let sigs = tx.create_sigs(&signature_secrets)?;
-            tx.signatures.push(sigs);
-
-            let (fee_call, fee_proofs, fee_secrets, _spent_fee_coins, fee_call_params) =
-                self.append_fee_call(proposer, tx, block_height, &[]).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, _spent_fee_coins, fee_call_params) =
+                self.append_fee_call(proposer, &mut tx_builder, block_height).await?;
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, params, fee_params, proposal))
     }
@@ -262,33 +250,21 @@ impl TestHarness {
         let mut data = vec![DaoFunction::Propose as u8];
         params.encode(&mut data)?;
         let call = ContractCall { contract_id: *DAO_CONTRACT_ID, data };
-        let mut tx_builder = TransactionBuilder::new(ContractCallLeaf { call, proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, proofs, signature_secrets),
+            vec![],
+        )?;
 
         // If fees are enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let sigs = tx.create_sigs(&signature_secrets)?;
-            tx.signatures.push(sigs);
-
-            let (fee_call, fee_proofs, fee_secrets, _spent_fee_coins, fee_call_params) =
-                self.append_fee_call(proposer, tx, block_height, &[]).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, _spent_fee_coins, fee_call_params) =
+                self.append_fee_call(proposer, &mut tx_builder, block_height).await?;
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, params, fee_params, proposal))
     }

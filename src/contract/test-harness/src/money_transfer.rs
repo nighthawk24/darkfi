@@ -73,42 +73,22 @@ impl TestHarness {
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing the `Transfer` call
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: secrets.proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, secrets.proofs, secrets.signature_secrets),
+            vec![],
+        )?;
 
-        // If we have tx fees enabled, we first have to execute the fee-less
-        // transaction to gather its used gas, and then we feed it into the
-        // fee-creating function.
-        // We also tell it about any spent coins so we don't accidentally
-        // reuse them in the fee call.
-        // TODO: We have to build a proper coin selection algorithm so that we
-        // can utilize the Money::Transfer to merge any coins which would give
-        // us a coin with enough value for paying the transaction fee.
+        // If we have tx fees enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let sigs = tx.create_sigs(&secrets.signature_secrets)?;
-            tx.signatures = vec![sigs];
-
-            let (fee_call, fee_proofs, fee_secrets, spent_fee_coins, fee_call_params) =
-                self.append_fee_call(holder, tx, block_height, &spent_coins).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, spent_fee_coins, fee_call_params) =
+                self.append_fee_call(holder, &mut tx_builder, block_height).await?;
             spent_coins.extend_from_slice(&spent_fee_coins);
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&secrets.signature_secrets)?;
-        tx.signatures = vec![sigs];
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, (params, fee_params), spent_coins))
     }

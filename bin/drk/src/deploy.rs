@@ -23,8 +23,6 @@ use rand::rngs::OsRng;
 
 use darkfi::{
     tx::{ContractCallLeaf, Transaction, TransactionBuilder},
-    zk::{proof::ProvingKey, vm::ZkCircuit, vm_heap::empty_witnesses},
-    zkas::ZkBinary,
     Error, Result,
 };
 use darkfi_deployooor_contract::{
@@ -32,11 +30,8 @@ use darkfi_deployooor_contract::{
     model::LockParamsV1,
     DeployFunction,
 };
-use darkfi_money_contract::MONEY_CONTRACT_ZKAS_FEE_NS_V1;
 use darkfi_sdk::{
-    crypto::{
-        ContractId, Keypair, PublicKey, SecretKey, DEPLOYOOOR_CONTRACT_ID, MONEY_CONTRACT_ID,
-    },
+    crypto::{ContractId, Keypair, PublicKey, SecretKey, DEPLOYOOOR_CONTRACT_ID},
     deploy::DeployParamsV1,
     tx::TransactionHash,
     ContractCall,
@@ -545,23 +540,6 @@ impl Drk {
             return Err(Error::Custom("[deploy_contract] Contract is locked".to_string()))
         }
 
-        // Now we need to do a lookup for the zkas proof bincodes, and create
-        // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("[deploy_contract] Fee circuit not found".to_string()))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuit proving keys
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
         // Create the contract call
         let deploy_call = DeployCallBuilder { deploy_keypair, wasm_bincode, deploy_ix };
         let deploy_debris = deploy_call.build()?;
@@ -572,30 +550,16 @@ impl Drk {
         let call = ContractCall { contract_id: *DEPLOYOOOR_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing above call
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: vec![] }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, vec![], vec![deploy_keypair.secret]),
+            vec![],
+        )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[deploy_keypair.secret])?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[deploy_keypair.secret])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Create a feeless contract redeployment lock transaction.
@@ -608,23 +572,6 @@ impl Drk {
             return Err(Error::Custom("[lock_contract] Contract is already locked".to_string()))
         }
 
-        // Now we need to do a lookup for the zkas proof bincodes, and create
-        // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("[lock_contract] Fee circuit not found".to_string()))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuit proving keys
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
         // Create the contract call
         let lock_call = LockCallBuilder { deploy_keypair };
         let lock_debris = lock_call.build()?;
@@ -635,29 +582,15 @@ impl Drk {
         let call = ContractCall { contract_id: *DEPLOYOOOR_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing above call
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: vec![] }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, vec![], vec![deploy_keypair.secret]),
+            vec![],
+        )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[deploy_keypair.secret])?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[deploy_keypair.secret])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 }

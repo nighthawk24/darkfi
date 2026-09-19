@@ -2016,13 +2016,7 @@ async fn realmain(args: Args, ex: ExecutorPtr) -> Result<()> {
             }
 
             // Create a transaction from the mapped calls
-            let (mut tx_builder, signature_secrets) = tx_from_calls_mapped(&calls, &calls_map)?;
-
-            // Now build the fee-less tx
-            let mut tx = tx_builder.build()?;
-            for secrets in &signature_secrets {
-                tx.signatures.push(tx.create_sigs(secrets)?);
-            }
+            let mut tx_builder = tx_from_calls_mapped(&calls, &calls_map)?;
 
             // Attach its fee and grab its signature
             let drk = new_wallet(
@@ -2035,20 +2029,13 @@ async fn realmain(args: Args, ex: ExecutorPtr) -> Result<()> {
                 args.fun,
             )
             .await;
-            if let Err(e) = drk.attach_fee(&mut tx).await {
-                eprintln!("Failed to attach the fee call to the transaction: {e}");
+            if let Err(e) = drk.append_fee_call(&mut tx_builder).await {
+                eprintln!("Failed to append the fee call to the transaction: {e}");
                 exit(2);
             };
-            // Its safe to unwrap here since we know the fee signature
-            // is in the last position.
-            let fee_signature = tx.signatures.last().unwrap().clone();
 
-            // Re-sign the tx using the calls secrets
-            tx.signatures = vec![];
-            for secrets in &signature_secrets {
-                tx.signatures.push(tx.create_sigs(secrets)?);
-            }
-            tx.signatures.push(fee_signature);
+            // Build the signed transaction
+            let tx = tx_builder.build_signed()?;
 
             println!("{}", base64::encode(&serialize_async(&tx).await));
 

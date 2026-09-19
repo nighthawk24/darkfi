@@ -2418,56 +2418,28 @@ async fn handle_tx_from_calls(
     }
 
     // Create a transaction from the mapped calls
-    let (mut tx_builder, signature_secrets) = match tx_from_calls_mapped(&calls, &calls_map) {
-        Ok(pair) => pair,
+    let mut tx_builder = match tx_from_calls_mapped(&calls, &calls_map) {
+        Ok(builder) => builder,
         Err(e) => {
             output.push(format!("Failed to create a transaction from the mapped calls: {e}"));
             return
         }
     };
 
-    // Now build and sign the fee-less tx
-    let mut tx = match tx_builder.build() {
+    // Append the fee call
+    if let Err(e) = drk.read().await.append_fee_call(&mut tx_builder).await {
+        output.push(format!("Failed to append the fee call to the transaction: {e}"));
+        return
+    }
+
+    // Now build and sign the tx
+    let tx = match tx_builder.build_signed() {
         Ok(tx) => tx,
         Err(e) => {
-            output.push(format!("Failed to build the transaction: {e}"));
+            output.push(format!("Failed to build the signed transaction: {e}"));
             return
         }
     };
-
-    for secrets in &signature_secrets {
-        let sigs = match tx.create_sigs(secrets) {
-            Ok(s) => s,
-            Err(e) => {
-                output.push(format!("Failed to create the transaction signatures: {e}"));
-                return
-            }
-        };
-        tx.signatures.push(sigs);
-    }
-
-    // Attach its fee and grab its signature
-    if let Err(e) = drk.read().await.attach_fee(&mut tx).await {
-        output.push(format!("Failed to attach the fee call to the transaction: {e}"));
-        return
-    }
-    // Its safe to unwrap here since we know the fee signature
-    // is in the last position.
-    let fee_signature = tx.signatures.last().unwrap().clone();
-
-    // Re-sign the tx using the calls secrets
-    tx.signatures = vec![];
-    for secrets in &signature_secrets {
-        let sigs = match tx.create_sigs(secrets) {
-            Ok(s) => s,
-            Err(e) => {
-                output.push(format!("Failed to create the transaction signatures: {e}"));
-                return
-            }
-        };
-        tx.signatures.push(sigs);
-    }
-    tx.signatures.push(fee_signature);
 
     output.push(base64::encode(&serialize_async(&tx).await));
 }
