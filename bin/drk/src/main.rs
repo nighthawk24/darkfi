@@ -2045,7 +2045,18 @@ async fn realmain(args: Args, ex: ExecutorPtr) -> Result<()> {
         Subcmd::Inspect => {
             let tx = parse_tx_from_stdin().await?;
 
-            println!("{}", pretty_tx(&tx));
+            let drk = new_wallet(
+                network,
+                blockchain_config.cache_path,
+                blockchain_config.wallet_path,
+                blockchain_config.wallet_pass,
+                None,
+                &ex,
+                args.fun,
+            )
+            .await;
+
+            println!("{}", pretty_tx(&tx, &drk).await);
 
             Ok(())
         }

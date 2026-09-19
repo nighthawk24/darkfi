@@ -19,7 +19,15 @@
 use std::collections::HashMap;
 
 use darkfi::{tx::Transaction, util::parse::encode_base10, zk::halo2::Field};
-use darkfi_money_contract::{client::OwnCoin, model::TokenId};
+use darkfi_money_contract::{
+    client::OwnCoin,
+    model::{
+        Coin, MoneyAuthTokenFreezeParamsV1, MoneyAuthTokenMintParamsV1, MoneyBurnParamsV1,
+        MoneyFeeParamsV1, MoneyGenesisMintParamsV1, MoneyPoWRewardParamsV1, MoneyTokenMintParamsV1,
+        MoneyTransferParamsV1, TokenId,
+    },
+    MoneyFunction,
+};
 use darkfi_sdk::{
     crypto::{
         keypair::{Address, Network, PublicKey, SecretKey, StandardAddress},
@@ -30,7 +38,7 @@ use darkfi_sdk::{
 use darkfi_serial::{deserialize, serialize};
 use prettytable::{format, row, Table};
 
-use crate::money::BALANCE_BASE10_DECIMALS;
+use crate::{money::BALANCE_BASE10_DECIMALS, Drk};
 
 pub fn prettytable_addrs(
     network: Network,
@@ -219,7 +227,130 @@ pub fn prettytable_scanned_blocks(scanned_blocks: &[(u32, String, String)]) -> T
     table
 }
 
-pub fn pretty_tx(tx: &Transaction) -> String {
+/// Parse money call data and return formatted inputs/outputs string
+async fn format_money_call_data(
+    calldata: &[u8],
+    nullifier_map: &HashMap<[u8; 32], Coin>,
+) -> String {
+    if calldata.is_empty() {
+        return "-".to_string();
+    }
+
+    let coin_display = |tx_local: bool, nullifier: &[u8; 32]| -> String {
+        if tx_local {
+            return "tx-local".to_string();
+        }
+        nullifier_map.get(nullifier).map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+    };
+
+    let output_display = |tx_local: bool, coin: &Coin| -> String {
+        if tx_local {
+            "tx-local".to_string()
+        } else {
+            coin.to_string()
+        }
+    };
+
+    let func_code = calldata[0];
+    match MoneyFunction::try_from(func_code) {
+        Ok(MoneyFunction::TransferV1) => {
+            let Some(params) = deserialize::<MoneyTransferParamsV1>(&calldata[1..]).ok() else {
+                return "Failed to parse TransferV1 data".to_string()
+            };
+            let mut parts = vec![];
+            if !params.inputs.is_empty() {
+                parts.push("Inputs:".to_string());
+                parts.extend(params.inputs.iter().enumerate().map(|(i, input)| {
+                    format!(
+                        "  [{}] {}",
+                        i,
+                        coin_display(input.tx_local, &input.nullifier.to_bytes())
+                    )
+                }));
+            }
+            if !params.outputs.is_empty() {
+                parts.push("Outputs:".to_string());
+                parts.extend(params.outputs.iter().enumerate().map(|(i, output)| {
+                    format!("  [{}] {}", i, output_display(output.tx_local, &output.coin))
+                }));
+            }
+            parts.join("\n")
+        }
+        Ok(MoneyFunction::FeeV1) => {
+            if calldata.len() <= 9 {
+                return "Invalid FeeV1 data length".to_string()
+            }
+            let Some(params) = deserialize::<MoneyFeeParamsV1>(&calldata[9..]).ok() else {
+                return "Failed to parse FeeV1 data".to_string()
+            };
+            format!(
+                "Input: {}\nOutput: {}",
+                coin_display(params.input.tx_local, &params.input.nullifier.to_bytes()),
+                output_display(params.output.tx_local, &params.output.coin)
+            )
+        }
+        Ok(MoneyFunction::BurnV1) => {
+            let Some(params) = deserialize::<MoneyBurnParamsV1>(&calldata[1..]).ok() else {
+                return "Failed to parse BurnV1 data".to_string()
+            };
+            let mut parts = vec!["Inputs:".to_string()];
+            parts.extend(params.inputs.iter().enumerate().map(|(i, input)| {
+                format!("  [{}] {}", i, coin_display(input.tx_local, &input.nullifier.to_bytes()))
+            }));
+            parts.join("\n")
+        }
+        Ok(MoneyFunction::GenesisMintV1) => {
+            let Some(params) = deserialize::<MoneyGenesisMintParamsV1>(&calldata[1..]).ok() else {
+                return "Failed to parse GenesisMintV1 data".to_string()
+            };
+            let mut parts = vec![format!(
+                "Input: Value: {}, Token: {}",
+                params.input.value, params.input.token_id
+            )];
+            if !params.outputs.is_empty() {
+                parts.push("Outputs:".to_string());
+                parts.extend(params.outputs.iter().enumerate().map(|(i, output)| {
+                    format!("  [{}] Coin: {}", i, output_display(output.tx_local, &output.coin))
+                }));
+            }
+            parts.join("\n")
+        }
+        Ok(MoneyFunction::PoWRewardV1) => {
+            let Some(params) = deserialize::<MoneyPoWRewardParamsV1>(&calldata[1..]).ok() else {
+                return "Failed to parse PoWRewardV1 data".to_string()
+            };
+            format!(
+                "Input: Value: {}, Token: {}\nOutput: Coin: {}",
+                params.input.value,
+                params.input.token_id,
+                output_display(params.output.tx_local, &params.output.coin)
+            )
+        }
+        Ok(MoneyFunction::TokenMintV1) => {
+            let Some(params) = deserialize::<MoneyTokenMintParamsV1>(&calldata[1..]).ok() else {
+                return "Failed to parse TokenMintV1 data".to_string()
+            };
+            format!("Coin: {}", params.coin)
+        }
+        Ok(MoneyFunction::AuthTokenMintV1) => {
+            let Some(params) = deserialize::<MoneyAuthTokenMintParamsV1>(&calldata[1..]).ok()
+            else {
+                return "Failed to parse AuthTokenMintV1 data".to_string()
+            };
+            format!("Token ID: {}, Mint Pubkey: {}", params.token_id, params.mint_pubkey)
+        }
+        Ok(MoneyFunction::AuthTokenFreezeV1) => {
+            let Some(params) = deserialize::<MoneyAuthTokenFreezeParamsV1>(&calldata[1..]).ok()
+            else {
+                return "Failed to parse AuthTokenFreezeV1 data".to_string()
+            };
+            format!("Token ID: {}, Mint Public: {}", params.token_id, params.mint_public)
+        }
+        Err(_) => format!("Invalid function code: {func_code}"),
+    }
+}
+
+pub async fn pretty_tx(tx: &Transaction, drk: &Drk) -> String {
     let hash = tx.hash().to_string();
 
     let mut fees: Vec<String> = vec![];
@@ -228,7 +359,9 @@ pub fn pretty_tx(tx: &Transaction) -> String {
 
     let mut table = Table::new();
     table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
-    table.add_row(row!["", "Contract", "Function"]);
+    table.set_titles(row!["", "Contract", "Function", "Details"]);
+
+    let nullifier_map = drk.get_coins_by_nullifier().await.unwrap_or_default();
 
     for (i, call) in tx.calls.iter().enumerate() {
         if call.data.is_money_fee() {
@@ -251,11 +384,44 @@ pub fn pretty_tx(tx: &Transaction) -> String {
         };
 
         let calldata = &call.data.data;
+
+        let fn_name = match (call.data.contract_id, calldata[0]) {
+            (id, 0x00) if id == *MONEY_CONTRACT_ID => "Fee",
+            (id, 0x01) if id == *MONEY_CONTRACT_ID => "GenesisMint",
+            (id, 0x02) if id == *MONEY_CONTRACT_ID => "PoWReward",
+            (id, 0x03) if id == *MONEY_CONTRACT_ID => "Transfer",
+            (id, 0x04) if id == *MONEY_CONTRACT_ID => "AuthTokenMint",
+            (id, 0x05) if id == *MONEY_CONTRACT_ID => "AuthTokenFreeze",
+            (id, 0x06) if id == *MONEY_CONTRACT_ID => "TokenMint",
+            (id, 0x07) if id == *MONEY_CONTRACT_ID => "Burn",
+            (id, 0x00) if id == *DAO_CONTRACT_ID => "Mint",
+            (id, 0x01) if id == *DAO_CONTRACT_ID => "Propose",
+            (id, 0x02) if id == *DAO_CONTRACT_ID => "Vote",
+            (id, 0x03) if id == *DAO_CONTRACT_ID => "Exec",
+            (id, 0x04) if id == *DAO_CONTRACT_ID => "AuthMoneyTransfer",
+            (id, 0x00) if id == *DEPLOYOOOR_CONTRACT_ID => "Deploy",
+            (id, 0x01) if id == *DEPLOYOOOR_CONTRACT_ID => "Lock",
+            _ => "",
+        };
+        let fn_name = Some(fn_name).filter(|x| !x.is_empty());
+
+        let details = if call.data.contract_id == *MONEY_CONTRACT_ID {
+            format_money_call_data(calldata, &nullifier_map).await
+        } else {
+            "-".to_string()
+        };
+
         table.add_row(row![
             i.to_string(),
             format!("{} [{}]", call.data.contract_id.to_string(), contract_name),
-            // Function code
-            if !calldata.is_empty() { calldata[0].to_string() } else { "-".to_string() },
+            if !calldata.is_empty() {
+                fn_name
+                    .map(|n| format!("{} [{}]", calldata[0], n))
+                    .unwrap_or_else(|| calldata[0].to_string())
+            } else {
+                "-".to_string()
+            },
+            details,
         ]);
     }
 

@@ -548,7 +548,7 @@ pub async fn interactive(
                 "dao" => handle_dao(drk, &parts, &input, &mut output).await,
                 "attach-fee" => handle_attach_fee(drk, &input, &mut output).await,
                 "tx-from-calls" => handle_tx_from_calls(drk, &parts, &input, &mut output).await,
-                "inspect" => handle_inspect(&input, &mut output).await,
+                "inspect" => handle_inspect(drk, &input, &mut output).await,
                 "broadcast" => handle_broadcast(drk, &input, &mut output).await,
                 "subscribe" => {
                     handle_subscribe(
@@ -2445,9 +2445,12 @@ async fn handle_tx_from_calls(
 }
 
 /// Auxiliary function to define the inspect command handling.
-async fn handle_inspect(input: &[String], output: &mut Vec<String>) {
+async fn handle_inspect(drk: &DrkPtr, input: &[String], output: &mut Vec<String>) {
     match parse_tx_from_input(input).await {
-        Ok(tx) => output.push(pretty_tx(&tx)),
+        Ok(tx) => {
+            let lock = drk.read().await;
+            output.push(pretty_tx(&tx, &lock).await);
+        }
         Err(e) => output.push(format!("Error while parsing transaction: {e}")),
     }
 }

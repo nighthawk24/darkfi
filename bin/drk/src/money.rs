@@ -51,7 +51,7 @@ use darkfi_sdk::{
         keypair::{Address, Keypair, PublicKey, SecretKey, StandardAddress},
         note::AeadEncryptedNote,
         pasta_prelude::PrimeField,
-        BaseBlind, FuncId, MerkleNode, MerkleTree, ScalarBlind, MONEY_CONTRACT_ID,
+        poseidon_hash, BaseBlind, FuncId, MerkleNode, MerkleTree, ScalarBlind, MONEY_CONTRACT_ID,
     },
     dark_tree::DarkLeaf,
     pasta::pallas,
@@ -519,6 +519,47 @@ impl Drk {
         }
 
         Ok(owncoins)
+    }
+
+    /// Get a mapping of nullifiers to coins for all coins in the wallet.
+    pub async fn get_coins_by_nullifier(&self) -> Result<HashMap<[u8; 32], Coin>> {
+        let query = self
+            .wallet
+            .query_multiple(
+                &MONEY_COINS_TABLE,
+                &[MONEY_COINS_COL_COIN, MONEY_COINS_COL_SECRET],
+                vec![],
+            )
+            .await;
+
+        let rows = match query {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(Error::DatabaseError(format!(
+                    "[get_coins_by_nullifier] Coins retrieval failed: {e}"
+                )))
+            }
+        };
+
+        let mut nullifier_map = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let Value::Blob(ref coin_bytes) = row[0] else {
+                return Err(Error::ParseFailed("[get_coins_by_nullifier] Coin bytes parsing failed"))
+            };
+            let coin: Coin = deserialize_async(coin_bytes).await?;
+
+            let Value::Blob(ref secret_bytes) = row[1] else {
+                return Err(Error::ParseFailed(
+                    "[get_coins_by_nullifier] Secret bytes parsing failed",
+                ))
+            };
+            let secret: SecretKey = deserialize_async(secret_bytes).await?;
+
+            let nullifier = Nullifier::from(poseidon_hash([secret.inner(), coin.inner()]));
+            nullifier_map.insert(nullifier.to_bytes(), coin);
+        }
+
+        Ok(nullifier_map)
     }
 
     /// Auxiliary function to parse a `MONEY_COINS_TABLE` record.
