@@ -18,7 +18,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    sync::{Arc, OnceLock, RwLock},
     time::Instant,
 };
 
@@ -65,6 +65,28 @@ pub struct DarkfidRpcClient {
     endpoint: Url,
     ex: ExecutorPtr,
     client: Option<RpcClient>,
+}
+
+/// Conservative TransferV1+FeeV1 overpay used when darkfid is not configured.
+pub const LIGHTWALLET_FEE_OVERESTIMATE_ATOMIC: u64 = 5_000_000;
+
+type ZkasLookupFallback = fn(&ContractId) -> Result<Vec<(String, Vec<u8>)>>;
+
+static ZKAS_LOOKUP_FALLBACK: OnceLock<RwLock<Option<ZkasLookupFallback>>> = OnceLock::new();
+
+fn zkas_lookup_fallback_slot() -> &'static RwLock<Option<ZkasLookupFallback>> {
+    ZKAS_LOOKUP_FALLBACK.get_or_init(|| RwLock::new(None))
+}
+
+/// Install a process-wide `lookup_zkas` fallback used when `rpc_client` is `None`.
+pub fn set_zkas_lookup_fallback(f: Option<ZkasLookupFallback>) {
+    if let Ok(mut slot) = zkas_lookup_fallback_slot().write() {
+        *slot = f;
+    }
+}
+
+fn zkas_lookup_fallback() -> Option<ZkasLookupFallback> {
+    zkas_lookup_fallback_slot().read().ok().and_then(|g| *g)
 }
 
 impl DarkfidRpcClient {
@@ -517,6 +539,13 @@ impl Drk {
 
     /// Simulate the transaction with the state machine.
     pub async fn simulate_tx(&self, tx: &Transaction) -> Result<bool> {
+        if self.rpc_client.is_none() {
+            tracing::debug!(
+                target: "drk::rpc",
+                "simulate_tx: no darkfid RPC; accepting tx (lightwalletd SendTransaction is the validator)"
+            );
+            return Ok(true);
+        }
         let tx_str = base64::encode(&serialize_async(tx).await);
         let rep = self
             .darkfid_daemon_request(
@@ -531,6 +560,12 @@ impl Drk {
 
     /// Try to fetch zkas bincodes for the given `ContractId`.
     pub async fn lookup_zkas(&self, contract_id: &ContractId) -> Result<Vec<(String, Vec<u8>)>> {
+        if self.rpc_client.is_none() {
+            if let Some(fallback) = zkas_lookup_fallback() {
+                return fallback(contract_id);
+            }
+            return Err(Error::RpcClientStopped);
+        }
         let params = JsonValue::Array(vec![JsonValue::String(format!("{contract_id}"))]);
         let rep = self.darkfid_daemon_request("blockchain.lookup_zkas", &params).await?;
         let params = rep.get::<Vec<JsonValue>>().unwrap();
@@ -547,6 +582,9 @@ impl Drk {
 
     /// Queries darkfid for given transaction's required fee.
     pub async fn get_tx_fee(&self, tx: &Transaction, include_fee: bool) -> Result<u64> {
+        if self.rpc_client.is_none() {
+            return Ok(LIGHTWALLET_FEE_OVERESTIMATE_ATOMIC);
+        }
         let params = JsonValue::Array(vec![
             JsonValue::String(base64::encode(&serialize_async(tx).await)),
             JsonValue::Boolean(include_fee),
@@ -560,6 +598,13 @@ impl Drk {
 
     /// Queries darkfid for current best fork next height.
     pub async fn get_next_block_height(&self) -> Result<u32> {
+        if self.rpc_client.is_none() {
+            return Err(Error::Custom(
+                "darkfid RPC is required for get_next_block_height (DAO); \
+                 lightwalletd-only wallets cannot provide this"
+                    .into(),
+            ));
+        }
         let rep = self
             .darkfid_daemon_request(
                 "blockchain.best_fork_next_block_height",
