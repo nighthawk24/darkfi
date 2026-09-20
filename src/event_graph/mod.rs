@@ -78,6 +78,9 @@ mod tests;
 mod tests_rln;
 
 #[cfg(test)]
+mod tests_mesh;
+
+#[cfg(test)]
 mod test_helpers;
 
 /// Number of parent references each event carries.
@@ -2270,6 +2273,28 @@ impl EventGraph {
         self.dag_insert_inner(events, blobs, /* require_blobs */ true, dag_name).await
     }
 
+    /// Maximum event blob accepted from Nighthawk Mesh (BLE reassembly cap).
+    pub const MAX_MESH_EVENT_BLOB: usize = 1024 * 1024 - 512;
+
+    /// Admit a mesh-sourced event using the same insert path as P2P sync.
+    ///
+    /// Does not skip RLN or structural checks. Oversized blobs are rejected
+    /// before insert so Bluetooth cannot become a compact-block dump.
+    pub async fn ingest_mesh_event(
+        &self,
+        event: Event,
+        blob: Vec<u8>,
+        dag_name: &str,
+    ) -> Result<Vec<blake3::Hash>> {
+        if blob.len() > Self::MAX_MESH_EVENT_BLOB {
+            return Err(Error::Custom("mesh event blob exceeds reassembly cap".into()))
+        }
+        if !event.validate_new() {
+            return Err(Error::Custom("mesh event failed structural validation".into()))
+        }
+        self.dag_insert_with_blobs(&[event], &[blob], dag_name).await
+    }
+
     /// Inner implementation shared by both insert paths. The
     /// `require_blobs` flag selects strict (sync) vs. lenient
     /// (post-verified) semantics.
@@ -3299,6 +3324,13 @@ impl EventGraph {
     /// layer; this method itself contains no JSON-RPC logic.
     pub async fn event_subscribe(&self) -> Subscription<Event> {
         self.event_pub.clone().subscribe().await
+    }
+
+    /// Mesh emit seam. Same publisher as [`Self::event_subscribe`];
+    /// fires only after an event has passed EventPut admission and
+    /// been committed. Mesh must not invent a second insert path.
+    pub async fn subscribe_accepted_events(&self) -> Subscription<Event> {
+        self.event_subscribe().await
     }
 
     /// Subscribe to static-DAG event insertions (RLN registrations
