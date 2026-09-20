@@ -745,8 +745,6 @@ impl DrkPlugin {
                 let shell_sender = shell_sender.clone();
                 let drk = drk.clone();
                 let ex = ex_.clone();
-                let progress_pub = self2.scan_progress_pub.clone();
-
                 let _ = self2
                     .node
                     .upgrade()
@@ -757,7 +755,7 @@ impl DrkPlugin {
                 if let Err(e) = drk
                     .read()
                     .await
-                    .scan_blocks(&mut vec![], Some(&shell_sender), &false, Some(progress_pub))
+                    .scan_blocks(&mut vec![], Some(&shell_sender), &false)
                     .await
                 {
                     e!("Failed during drk scanning: {e}");
