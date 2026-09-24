@@ -35,7 +35,7 @@ use darkfi_money_contract::{
     client::{
         compute_remainder_blind,
         fee_v1::{create_fee_proof, FeeCallInput, FeeCallOutput, FEE_CALL_GAS},
-        MoneyNote, OwnCoin,
+        money_call_nullifiers, MoneyNote, OwnCoin,
     },
     model::{
         Coin, Input, MoneyAuthTokenFreezeParamsV1, MoneyBurnParamsV1, MoneyFeeParamsV1,
@@ -1075,29 +1075,6 @@ impl Drk {
         Ok((wallet_spent_coins || !owncoins.is_empty() || wallet_freezes, block_signing_key))
     }
 
-    /// Auxiliary function to  grab all the nullifiers from a transaction money call.
-    async fn money_call_nullifiers(&self, call: &DarkLeaf<ContractCall>) -> Result<Vec<Nullifier>> {
-        let mut nullifiers: Vec<Nullifier> = vec![];
-
-        let data = &call.data.data;
-        match MoneyFunction::try_from(data[0])? {
-            MoneyFunction::FeeV1 => {
-                let params: MoneyFeeParamsV1 = deserialize_async(&data[9..]).await?;
-                nullifiers.push(params.input.nullifier);
-            }
-            MoneyFunction::TransferV1 => {
-                let params: MoneyTransferParamsV1 = deserialize_async(&data[1..]).await?;
-
-                for input in params.inputs {
-                    nullifiers.push(input.nullifier);
-                }
-            }
-            _ => { /* Do nothing */ }
-        }
-
-        Ok(nullifiers)
-    }
-
     /// Mark provided transaction input coins as spent.
     pub async fn mark_tx_spend(&self, tx: &Transaction, output: &mut Vec<String>) -> Result<()> {
         // Create a cache of all our own nullifiers
@@ -1117,7 +1094,7 @@ impl Drk {
             }
 
             output.push(format!("[mark_tx_spend] Found Money contract in call {i}"));
-            let nullifiers = self.money_call_nullifiers(call).await?;
+            let nullifiers = money_call_nullifiers(&call.data).await?;
             self.mark_spent_coins(None, &owncoins_nullifiers, &nullifiers, &None, &tx_hash).await?;
         }
 
@@ -1407,7 +1384,7 @@ impl Drk {
                 _ => { /* Do nothing */ }
             }
 
-            let nullifiers = self.money_call_nullifiers(call).await?;
+            let nullifiers = money_call_nullifiers(&call.data).await?;
             tx_nullifiers.extend_from_slice(&nullifiers);
         }
 
