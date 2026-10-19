@@ -16,7 +16,7 @@ darkfi_deployooor_contract = {path = "../deployooor", features = ["client", "no-
 
 num-bigint = "0.4.6"
 blake3 = "1.8.5"
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", version = "0.1.0"}
+kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
 rand = "0.8.6"

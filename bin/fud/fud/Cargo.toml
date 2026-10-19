@@ -48,7 +48,7 @@ blake2 = "0.10.6"
 equix = "0.6.1"
 
 # Database
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", version = "0.1.0"}
+kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 
 # Argument parsing
 serde = {version = "1.0.228", features = ["derive"]}

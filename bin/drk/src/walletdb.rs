@@ -28,6 +28,22 @@ pub type WalletPtr = Arc<WalletDb>;
 
 const ENCRYPTION_ALGO: &str = "aegis256";
 
+std::thread_local! {
+    static LAST_WALLET_OPEN_ERROR: std::cell::Cell<Option<String>> = const { std::cell::Cell::new(None) };
+}
+
+/// Turso detail from the most recent failed [`WalletDb::new`] on this thread.
+pub fn take_last_open_error() -> Option<String> {
+    LAST_WALLET_OPEN_ERROR.with(|c| c.take())
+}
+
+fn note_open_error(err: impl std::fmt::Display) -> WalletDbError {
+    let msg = err.to_string();
+    error!(target: "walletdb::new", "[WalletDb] open failed: {msg}");
+    LAST_WALLET_OPEN_ERROR.with(|c| c.set(Some(msg)));
+    WalletDbError::ConnectionFailed
+}
+
 /// Structure representing base wallet database operations.
 pub struct WalletDb {
     /// Connection to the turso database.
@@ -62,13 +78,15 @@ impl WalletDb {
         };
 
         // Initialize connection builder
-        let Ok(builder) = builder.build().await else {
-            return Err(WalletDbError::ConnectionFailed);
+        let builder = match builder.build().await {
+            Ok(builder) => builder,
+            Err(e) => return Err(note_open_error(e)),
         };
 
         // Connect to database
-        let Ok(conn) = builder.connect() else {
-            return Err(WalletDbError::ConnectionFailed);
+        let conn = match builder.connect() {
+            Ok(conn) => conn,
+            Err(e) => return Err(note_open_error(e)),
         };
 
         // Set foreign keys pragma

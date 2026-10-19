@@ -28,7 +28,7 @@ darkfi-serial = {path = "../../src/serial", features = ["async"]}
 libc = "0.2.186"
 
 # Event Graph DB
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", version = "0.1.0"}
+kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 
 # TLS
 async-trait = "0.1.89"

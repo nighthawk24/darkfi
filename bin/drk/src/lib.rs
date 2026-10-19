@@ -68,7 +68,7 @@ pub mod scanned_blocks;
 
 /// Wallet database operations handler
 pub mod walletdb;
-use walletdb::{WalletDb, WalletPtr};
+use walletdb::{take_last_open_error, WalletDb, WalletPtr};
 
 /// Blockchain cache database operations handler
 pub mod cache;
@@ -104,8 +104,14 @@ impl Drk {
         // Initialize blockchain cache database
         let db_path = expand_path(&cache_path)?;
         let kvdb = kvdb_overlay::Database::open_default(&db_path)?;
-        let Ok(cache) = Cache::new(&kvdb) else {
-            return Err(Error::DatabaseError(format!("{}", WalletDbError::InitializationFailed)));
+        let cache = match Cache::new(&kvdb) {
+            Ok(cache) => cache,
+            Err(e) => {
+                return Err(Error::DatabaseError(format!(
+                    "{}: cache: {e}",
+                    WalletDbError::InitializationFailed
+                )));
+            }
         };
 
         // Initialize wallet
@@ -115,8 +121,15 @@ impl Drk {
                 create_dir_all(parent)?;
             }
         }
-        let Ok(wallet) = WalletDb::new(Some(wallet_path), Some(&wallet_pass)).await else {
-            return Err(Error::DatabaseError(format!("{}", WalletDbError::InitializationFailed)));
+        let wallet = match WalletDb::new(Some(wallet_path), Some(&wallet_pass)).await {
+            Ok(wallet) => wallet,
+            Err(e) => {
+                let detail = take_last_open_error().unwrap_or_default();
+                return Err(Error::DatabaseError(format!(
+                    "{}: wallet: {e}: {detail}",
+                    WalletDbError::InitializationFailed
+                )));
+            }
         };
 
         // Initialize rpc client
