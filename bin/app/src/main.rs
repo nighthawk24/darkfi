@@ -52,6 +52,7 @@ mod setting;
 mod sfx;
 mod shape;
 mod text;
+mod theme;
 mod ui;
 mod util;
 
@@ -59,7 +60,7 @@ use crate::{
     app::{App, AppPtr},
     db::{AppDb, AppDbPtr},
     gfx::EpochIndex,
-    prop::{Property, PropertySubType, PropertyType},
+    prop::{Property, PropertyPermission, PropertySubType, PropertyType},
     scene::{CallArgType, SceneNode, SceneNodePtr, SceneNodeType},
     ui::RedrawTrigger,
     util::AsyncRuntime,
@@ -337,8 +338,20 @@ async fn load_plugins(
             id.encode(&mut data).unwrap();
             nick.encode(&mut data).unwrap();
             msg.encode(&mut data).unwrap();
-            if let Err(err) = chatview.call_method("receive", data).await {
+            if let Err(err) = chatview.call_method("receive", data.clone()).await {
                 error!(target: "app", "Call method {node_path}::receive({channel}, {timestamp}, {id}): {err:?}");
+            }
+
+            // Fan out to the wallet screen's feed view: bound to the
+            // reserved `*` pseudo-channel, it live-inserts every
+            // channel's messages so the feed stays current. Persistence
+            // dedups (composite key) against the chat screen chatty's
+            // writes; the insert keeps the feed buffer fresh even while
+            // the wallet screen is hidden.
+            if let Some(feed_chatty) =
+                sg_root2.lookup_node("/window/content/wallet/main_layer/feed_layer/feed_chatty")
+            {
+                let _ = feed_chatty.call_method("receive", data).await;
             }
 
             // Apply coloring when the message is not being viewed:
@@ -353,6 +366,14 @@ async fn load_plugins(
 
             let menu_node =
                 sg_root2.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
+            // Unread coloring only for joined channels: the feed now
+            // relays every public room on the network, and role-group
+            // entries without a menu item are inert — don't let them
+            // accumulate.
+            let items = menu_node.get_property("items").unwrap();
+            if !items.contains_str(&channel) {
+                continue
+            }
             let group_name = if msg.contains(&darkirc_nick.get()) { "role2_group" } else { "role1_group" };
             let group = menu_node.get_property(group_name).unwrap();
             if !group.get_str_vec().unwrap().contains(&channel) {
@@ -748,18 +769,33 @@ pub fn create_darkirc(name: &str) -> SceneNode {
     t!("create_darkirc({name})");
     let mut node = SceneNode::new(name, SceneNodeType::Plugin);
 
-    let mut prop = Property::new("nick", PropertyType::Str, PropertySubType::Null);
+    let mut prop = Property::new(
+        "nick",
+        PropertyType::Str,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_ui_text("Nick", "Nickname");
     prop.set_defaults_str(vec!["anon".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("dm_public", PropertyType::Str, PropertySubType::Null);
+    let mut prop = Property::new(
+        "dm_public",
+        PropertyType::Str,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_ui_text("DM Public Key", "Your DM public key (share with contacts)");
     prop.allow_null_values();
     prop.set_defaults_null().unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("outbound_peers", PropertyType::Str, PropertySubType::Null);
+    let mut prop = Property::new(
+        "outbound_peers",
+        PropertyType::Str,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_ui_text("Outbound Peers", "Connected outbound peers");
     #[cfg(feature = "enable-plugin-darkirc")]
     prop.set_array_len(plugin::darkirc::P2P_OUTBOUND_ACTIVE);
@@ -806,7 +842,12 @@ pub fn create_fud(name: &str) -> SceneNode {
     t!("create_fud({name})");
     let mut node = SceneNode::new(name, SceneNodeType::Plugin);
 
-    let mut prop = Property::new("ready", PropertyType::Bool, PropertySubType::Null);
+    let mut prop = Property::new(
+        "ready",
+        PropertyType::Bool,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_defaults_bool(vec![false]).unwrap();
     node.add_property(prop).unwrap();
 

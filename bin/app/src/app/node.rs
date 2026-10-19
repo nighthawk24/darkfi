@@ -17,36 +17,59 @@
  */
 
 use crate::{
-    prop::{Property, PropertySubType, PropertyType},
+    prop::{Property, PropertyPermission, PropertySubType, PropertyType, Role},
     scene::{CallArgType, SceneNode, SceneNodeType},
 };
 
 #[cfg(target_os = "android")]
-use crate::prop::{PropertyAtomicGuard, Role};
+use crate::prop::PropertyAtomicGuard;
+
+/// Themeable style (colors, font metrics, padding, spacing): schema
+/// installs defaults, themes override via vals. Widgets never write
+/// these at runtime (no Internal) — the style/structure split (D13).
+const PERM_STYLE: PropertyPermission =
+    PropertyPermission { read: Role::ALL, write: Role::App.union(Role::Theme) };
+
+/// Widget-computed/runtime state (height, scroll, focus, selection):
+/// written by the owning widget (Internal) or schema bootstrap (App).
+/// Themes are excluded, enforcing D4: a theme override on a widget-
+/// written property would be clobbered by the widget's own writes.
+const PERM_RUNTIME: PropertyPermission =
+    PropertyPermission { read: Role::ALL, write: Role::App.union(Role::Internal) };
+
+/// Behavior toggles (is_active, is_visible) and schema-owned content:
+/// write App, plus User for the RPC debug tooling boundary.
+/// Themes must not change what the UI does or says.
+const PERM_APP: PropertyPermission =
+    PropertyPermission { read: Role::ALL, write: Role::App.union(Role::User) };
+
+/// Content/data the owning widget also writes at runtime (edit text,
+/// menus): Internal joins App and User.
+const PERM_CONTENT: PropertyPermission = PropertyPermission {
+    read: Role::ALL,
+    write: Role::App.union(Role::Internal).union(Role::User),
+};
 
 pub fn create_window(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Window);
 
-    let mut prop = Property::new("locale", PropertyType::Str, PropertySubType::Locale);
+    let mut prop = Property::new("locale", PropertyType::Str, PropertySubType::Locale, PERM_APP);
     prop.set_defaults_str(vec!["en-US".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("screen_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("screen_size", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     prop.set_array_len(2);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("insets", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("insets", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     prop.set_ui_text(
         "Window Insets",
         "Window insets applied by the system (left, top, right, bottom)",
     );
     prop.set_array_len(4);
     prop.set_defaults_f32(vec![0., 0., 0., 0.]).unwrap();
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("scale", PropertyType::Float32, PropertySubType::Null);
-    prop.set_ui_text("Scale", "Window scale factor for DPI scaling");
-    prop.set_defaults_f32(vec![1.0]).unwrap();
     node.add_property(prop).unwrap();
 
     node.add_signal("start", "App UI started", vec![]).unwrap();
@@ -63,27 +86,33 @@ pub fn create_window(name: &str) -> SceneNode {
 
 pub fn create_layer(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Layer);
-    let prop = Property::new("is_visible", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("is_visible", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("alpha", PropertyType::Float32, PropertySubType::Null);
+    let mut prop = Property::new("alpha", PropertyType::Float32, PropertySubType::Null, PERM_STYLE);
     prop.set_ui_text("Alpha", "Layer transparency for all drawn content (0.0-1.0)");
     prop.set_range_f32(0., 1.);
     prop.set_defaults_f32(vec![1.0]).unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node
@@ -92,27 +121,41 @@ pub fn create_layer(name: &str) -> SceneNode {
 pub fn create_vector_art(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::VectorArt);
 
-    let mut prop = Property::new("is_visible", PropertyType::Bool, PropertySubType::Null);
+    let mut prop = Property::new("is_visible", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     prop.set_defaults_bool(vec![true]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("shape", PropertyType::VectorShape, PropertySubType::Null);
+    // Shape content: schema builds neutral shapes; themes rebuild themed
+    // shapes structurally over them (design non-goal keeps shape colors
+    // baked, so themes override the whole shape).
+    let prop = Property::new(
+        "shape",
+        PropertyType::VectorShape,
+        PropertySubType::Null,
+        PropertyPermission { read: Role::ALL, write: Role::App | Role::Theme | Role::User },
+    );
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("scale", PropertyType::Float32, PropertySubType::Null);
+    let mut prop = Property::new("scale", PropertyType::Float32, PropertySubType::Null, PERM_STYLE);
     prop.set_ui_text("Scale", "Scale factor for the vector art");
     prop.set_defaults_f32(vec![1.0]).unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node
@@ -121,22 +164,27 @@ pub fn create_vector_art(name: &str) -> SceneNode {
 pub fn create_button(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Button);
 
-    let mut prop = Property::new("is_active", PropertyType::Bool, PropertySubType::Null);
+    let mut prop = Property::new("is_active", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Is Active", "An active Button can be clicked");
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node.add_signal("click", "Button clicked event", vec![]).unwrap();
@@ -144,14 +192,241 @@ pub fn create_button(name: &str) -> SceneNode {
     node
 }
 
+pub fn create_slider(name: &str) -> SceneNode {
+    let mut node = SceneNode::new(name, SceneNodeType::Slider);
+
+    let mut prop =
+        Property::new("is_active", PropertyType::Bool, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Is Active", "An active Slider can be interacted with");
+    prop.set_defaults_bool(vec![false]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
+    prop.set_array_len(4);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("value", PropertyType::Float32, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Value", "Current slider value");
+    prop.set_defaults_f32(vec![0.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new("min", PropertyType::Float32, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Minimum", "Minimum value");
+    prop.set_defaults_f32(vec![0.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new("max", PropertyType::Float32, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Maximum", "Maximum value");
+    prop.set_defaults_f32(vec![1.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("step", PropertyType::Float32, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Step", "Value snap step (0 = continuous)");
+    prop.set_defaults_f32(vec![0.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("thickness", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.set_ui_text("Thickness", "Track height in pixels");
+    prop.set_defaults_f32(vec![6.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("thumb_radius", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.set_ui_text("Thumb Radius", "Thumb circle radius in pixels");
+    prop.set_defaults_f32(vec![10.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("track_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Track Color", "Track background color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0.3, 0.3, 0.3, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("fill_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Fill Color", "Filled track color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0., 0.94, 1., 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("thumb_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Thumb Color", "Thumb color (RGBA), used for the stepper glyphs");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![1., 1., 1., 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("thumb_shape", PropertyType::VectorShape, PropertySubType::Null, PERM_STYLE);
+    prop.set_ui_text("Thumb Shape", "Origin-centered shape drawn at the thumb");
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("show_stepper", PropertyType::Bool, PropertySubType::Null, PERM_STYLE);
+    prop.set_ui_text("Show Stepper", "Draw -/+ buttons stealing width on both track sides");
+    prop.set_defaults_bool(vec![false]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    node.add_signal(
+        "changing",
+        "Value updated continuously during interaction",
+        vec![("value", "Current value", CallArgType::Float32)],
+    )
+    .unwrap();
+
+    node.add_signal(
+        "changed",
+        "Value committed on release",
+        vec![("value", "Final value", CallArgType::Float32)],
+    )
+    .unwrap();
+
+    node
+}
+
+pub fn create_dropdown(name: &str) -> SceneNode {
+    let mut node = SceneNode::new(name, SceneNodeType::Dropdown);
+
+    let mut prop =
+        Property::new("is_active", PropertyType::Bool, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Is Active", "An active Dropdown can be interacted with");
+    prop.set_defaults_bool(vec![false]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
+    prop.set_array_len(4);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new("items", PropertyType::Str, PropertySubType::Null, PERM_APP);
+    prop.set_ui_text("Items", "Selectable items");
+    prop.set_unbounded();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("selected", PropertyType::Uint32, PropertySubType::Null, PERM_RUNTIME);
+    prop.set_ui_text("Selected", "Index of the selected item");
+    prop.set_defaults_u32(vec![0]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("item_height", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.set_ui_text("Item Height", "Height of one list row in pixels");
+    prop.set_defaults_f32(vec![40.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("list_width", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.set_ui_text("List Width", "Open list width in pixels (0 = match the box width)");
+    prop.set_defaults_f32(vec![0.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("box_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Box Color", "Closed box and list background color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0., 0.12, 0.08, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("outline_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Outline Color", "Box and list outline color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0.08, 0.68, 0.72, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("selected_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Selected Color", "Selected item highlight color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0.08, 0.68, 0.72, 0.25]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("hover_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Hover Color", "Hovered item highlight color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0., 0.22, 0.16, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Text Color", "Item label color (RGBA)");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0.90, 0.90, 0.90, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.set_ui_text("Font Size", "Item label font size in pixels");
+    prop.set_defaults_f32(vec![14.]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    node.add_signal("opened", "The list was opened", vec![]).unwrap();
+    node.add_signal("closed", "The list was closed", vec![]).unwrap();
+
+    node.add_signal(
+        "selection_changed",
+        "An item was selected",
+        vec![
+            ("index", "Selected item index", CallArgType::Uint32),
+            ("item", "Selected item", CallArgType::Str),
+        ],
+    )
+    .unwrap();
+
+    node
+}
+
 pub fn create_shortcut(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Shortcut);
 
-    let mut prop = Property::new("key", PropertyType::Str, PropertySubType::Null);
+    let mut prop = Property::new("key", PropertyType::Str, PropertySubType::Null, PERM_APP);
     prop.allow_null_values();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node.add_signal("shortcut", "Shortcut triggered", vec![]).unwrap();
@@ -163,25 +438,35 @@ pub fn create_shortcut(name: &str) -> SceneNode {
 pub fn create_image(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Image);
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("uv", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "uv",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     prop.set_range_f32(0., 1.);
     prop.set_defaults_f32(vec![0., 0., 1., 1.]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("path", PropertyType::Str, PropertySubType::Null);
+    let prop = Property::new("path", PropertyType::Str, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node
@@ -190,25 +475,35 @@ pub fn create_image(name: &str) -> SceneNode {
 pub fn create_video(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Image);
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("uv", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "uv",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     prop.set_range_f32(0., 1.);
     prop.set_defaults_f32(vec![0., 0., 1., 1.]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("path", PropertyType::Str, PropertySubType::Null);
+    let mut prop = Property::new("path", PropertyType::Str, PropertySubType::Null, PERM_APP);
     #[cfg(target_os = "android")]
     prop.set_ui_text("Path", "Path to .mp4 video file (H.264 format)");
     #[cfg(not(target_os = "android"))]
@@ -221,51 +516,64 @@ pub fn create_video(name: &str) -> SceneNode {
 pub fn create_text(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Text);
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("height", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("height", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("lineheight", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("lineheight", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Line Height", "Line height/lead (em)");
     prop.set_defaults_f32(vec![1.2]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_align", PropertyType::Enum, PropertySubType::Null);
+    let mut prop = Property::new("text_align", PropertyType::Enum, PropertySubType::Null, PERM_APP);
     prop.set_enum_items(vec!["start", "end", "left", "center", "right", "justify"]).unwrap();
     prop.set_defaults_str(vec!["start".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("text", PropertyType::Str, PropertySubType::Null);
+    let prop = Property::new("text", PropertyType::Str, PropertySubType::Null, PERM_CONTENT);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("overflow_wrap", PropertyType::Enum, PropertySubType::Null);
+    let mut prop =
+        Property::new("overflow_wrap", PropertyType::Enum, PropertySubType::Null, PERM_APP);
     prop.set_enum_items(vec!["normal", "anywhere", "break-word"]).unwrap();
     prop.set_defaults_str(vec!["normal".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("use_i18n", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("use_i18n", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node
@@ -274,67 +582,84 @@ pub fn create_text(name: &str) -> SceneNode {
 pub fn create_text_scramble(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::TextScramble);
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("height", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("height", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("lineheight", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("lineheight", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Line Height", "Line height/lead (em)");
     prop.set_defaults_f32(vec![1.2]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_align", PropertyType::Enum, PropertySubType::Null);
+    let mut prop = Property::new("text_align", PropertyType::Enum, PropertySubType::Null, PERM_APP);
     prop.set_enum_items(vec!["start", "end", "left", "center", "right", "justify"]).unwrap();
     prop.set_defaults_str(vec!["start".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("text", PropertyType::Str, PropertySubType::Null);
+    let prop = Property::new("text", PropertyType::Str, PropertySubType::Null, PERM_CONTENT);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("scramble_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("scramble_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_ui_text("Scramble Color", "Text color for characters that have not solved yet");
     prop.set_array_len(4);
-    prop.set_defaults_f32(vec![0.36, 1., 0.51, 1.]).unwrap();
+    prop.set_defaults_f32(vec![0.5, 0.5, 0.5, 1.]).unwrap();
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("overflow_wrap", PropertyType::Enum, PropertySubType::Null);
+    let mut prop =
+        Property::new("overflow_wrap", PropertyType::Enum, PropertySubType::Null, PERM_APP);
     prop.set_enum_items(vec!["normal", "anywhere", "break-word"]).unwrap();
     prop.set_defaults_str(vec!["normal".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("use_i18n", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("use_i18n", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("solve_probability", PropertyType::Float32, PropertySubType::Null);
+    let mut prop =
+        Property::new("solve_probability", PropertyType::Float32, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Solve Probability", "Chance per tick that an unsolved character locks in");
     prop.set_defaults_f32(vec![0.1]).unwrap();
     prop.set_range_f32(0., 1.);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("tick_interval", PropertyType::Uint32, PropertySubType::Null);
+    let mut prop =
+        Property::new("tick_interval", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Tick Interval", "Milliseconds between scramble animation ticks");
     prop.set_defaults_u32(vec![50]).unwrap();
     node.add_property(prop).unwrap();
@@ -345,136 +670,177 @@ pub fn create_text_scramble(name: &str) -> SceneNode {
 pub fn create_baseedit(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Edit);
 
-    let mut prop = Property::new("is_active", PropertyType::Bool, PropertySubType::Null);
+    let mut prop = Property::new("is_active", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Is Active", "An active EditBox can be focused");
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("is_focused", PropertyType::Bool, PropertySubType::Null);
+    let mut prop =
+        Property::new("is_focused", PropertyType::Bool, PropertySubType::Null, PERM_RUNTIME);
     prop.set_ui_text("Is Focused", "A focused EditBox receives input");
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("baseline", PropertyType::Float32, PropertySubType::Pixel);
+    let prop = Property::new("baseline", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("lineheight", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("lineheight", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Line Height", "Line height/lead (em)");
     prop.set_defaults_f32(vec![1.2]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("padding", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("padding", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Inner Padding", "Padding inside - top, right, bottom, left");
     prop.set_range_f32(0., f32::MAX);
     prop.set_array_len(4);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("scroll_speed", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("scroll_speed", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_ui_text("Scroll Speed", "Scrolling speed");
     prop.set_defaults_f32(vec![4.]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("text", PropertyType::Str, PropertySubType::Null);
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("text_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_array_len(4);
-    prop.set_range_f32(0., 1.);
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("text_hi_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_array_len(4);
-    prop.set_range_f32(0., 1.);
-    node.add_property(prop).unwrap();
-
-    let prop = Property::new("placeholder_text", PropertyType::Str, PropertySubType::Null);
+    let prop = Property::new("text", PropertyType::Str, PropertySubType::Null, PERM_CONTENT);
     node.add_property(prop).unwrap();
 
     let mut prop =
-        Property::new("placeholder_color", PropertyType::Float32, PropertySubType::Color);
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_cmd_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("text_hi_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cursor_color", PropertyType::Float32, PropertySubType::Color);
+    let prop =
+        Property::new("placeholder_text", PropertyType::Str, PropertySubType::Null, PERM_APP);
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "placeholder_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cursor_width", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("text_cmd_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("cursor_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("cursor_width", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_defaults_f32(vec![2.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cursor_ascent", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("cursor_ascent", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_defaults_f32(vec![10.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cursor_descent", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("cursor_descent", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("select_ascent", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("select_ascent", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_defaults_f32(vec![10.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("select_descent", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("select_descent", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("handle_descent", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("handle_descent", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("hi_bg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("hi_bg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cmd_bg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("cmd_bg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("select_text", PropertyType::Str, PropertySubType::Null);
+    let mut prop =
+        Property::new("select_text", PropertyType::Str, PropertySubType::Null, PERM_RUNTIME);
     prop.allow_null_values();
     prop.set_defaults_null().unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cursor_blink_time", PropertyType::Uint32, PropertySubType::Null);
+    let mut prop =
+        Property::new("cursor_blink_time", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     prop.set_defaults_u32(vec![500]).unwrap();
     prop.set_range_u32(0, u32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cursor_idle_time", PropertyType::Uint32, PropertySubType::Null);
+    let mut prop =
+        Property::new("cursor_idle_time", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     prop.set_defaults_u32(vec![150]).unwrap();
     prop.set_range_u32(0, u32::MAX);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null);
+    let prop = Property::new("debug", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("android_input_type", PropertyType::Uint32, PropertySubType::Null);
+    let mut prop =
+        Property::new("android_input_type", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     #[cfg(target_os = "android")]
     {
         use crate::android::textinput::input_types::*;
@@ -482,30 +848,38 @@ pub fn create_baseedit(name: &str) -> SceneNode {
     }
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("action_fg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("action_fg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_ui_text("Action Menu FG Color", "Foreground color of action menu items");
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
-    prop.set_defaults_f32(vec![0., 0.94, 1., 1.]).unwrap();
+    prop.set_defaults_f32(vec![0.9, 0.9, 0.9, 1.]).unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("action_bg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("action_bg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_ui_text("Action Menu BG Color", "Background color of action menu items");
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
     prop.set_defaults_f32(vec![0.1, 0.1, 0.1, 0.9]).unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("action_padding", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("action_padding", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Action Menu Padding", "Padding inside action menu items");
     prop.set_defaults_f32(vec![8.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("action_spacing", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("action_spacing", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Action Menu Spacing", "Spacing between action menu items");
     prop.set_defaults_f32(vec![4.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
     node.add_signal("enter_pressed", "Enter key pressed", vec![]).unwrap();
@@ -538,7 +912,8 @@ pub fn create_multiline_edit(name: &str) -> SceneNode {
         node.set_property_u32(atom, Role::App, "android_input_type", input_type).unwrap();
     }
 
-    let mut prop = Property::new("height_range", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("height_range", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     prop.set_ui_text("Min/Max Height", "Minimum and Maximum height");
     prop.set_range_f32(0., f32::MAX);
     prop.set_array_len(2);
@@ -565,62 +940,100 @@ pub fn create_decimal_edit(name: &str) -> SceneNode {
 pub fn create_chatview(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::ChatView);
 
-    let prop = Property::new("channel", PropertyType::Str, PropertySubType::Null);
+    // Widget-written runtime state: ChatView::set_channel writes it
+    // through its Internal-role wrap.
+    let prop = Property::new("channel", PropertyType::Str, PropertySubType::Null, PERM_RUNTIME);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("timestamp_font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "timestamp_font_size",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_STYLE,
+    );
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("timestamp_width", PropertyType::Float32, PropertySubType::Pixel);
+    let prop = Property::new(
+        "timestamp_width",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("line_height", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("line_height", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("message_spacing", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("message_spacing", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("baseline", PropertyType::Float32, PropertySubType::Pixel);
+    let prop = Property::new("baseline", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("timestamp_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("timestamp_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("show_channel", PropertyType::Bool, PropertySubType::Null, PERM_APP);
+    prop.set_ui_text("Show channel", "Render each message's channel name beside the timestamp");
+    prop.set_defaults_bool(vec![false]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("hi_bg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("hi_bg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("wheel_page_frac", PropertyType::Float32, PropertySubType::Null);
+    let mut prop =
+        Property::new("wheel_page_frac", PropertyType::Float32, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Wheel page fraction", "Viewport fraction scrolled per wheel notch");
     prop.set_defaults_f32(vec![0.5]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("is_at_bottom", PropertyType::Bool, PropertySubType::Null);
+    let mut prop =
+        Property::new("is_at_bottom", PropertyType::Bool, PropertySubType::Null, PERM_RUNTIME);
     prop.set_ui_text("At bottom", "Whether the view sits at the live bottom");
     prop.set_defaults_bool(vec![true]).unwrap();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node.add_signal(
@@ -667,71 +1080,180 @@ pub fn create_chatview(name: &str) -> SceneNode {
 pub fn create_privmsg_node(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::PrivMsgNode);
 
-    let mut prop = Property::new("nick_colors", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "nick_colors",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PropertyPermission { read: Role::ALL, write: Role::App | Role::Theme | Role::User },
+    );
     prop.set_unbounded();
     prop.set_range_f32(0., 1.);
     node.add_property(prop).unwrap();
 
-    let mut prop =
-        Property::new("action_text_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop = Property::new(
+        "action_text_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("url_text_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_array_len(4);
-    prop.set_range_f32(0., 1.);
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("url_bg_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_array_len(4);
-    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
     let mut prop =
-        Property::new("url_bg_border_size", PropertyType::Float32, PropertySubType::Pixel);
+        Property::new("url_text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("url_bg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "url_bg_border_size",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_STYLE,
+    );
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "url_bg_border_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    // Channel label (the room-name span shown when channel display is
+    // active). Type-specific styling: lives here, on the privmsg node.
+    let mut prop =
+        Property::new("channel_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "channel_font_size",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_STYLE,
+    );
+    prop.set_defaults_f32(vec![12.]).unwrap();
+    prop.set_range_f32(0.01, f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
     let mut prop =
-        Property::new("url_bg_border_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_array_len(4);
-    prop.set_range_f32(0., 1.);
+        Property::new("channel_spacing", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.set_defaults_f32(vec![4.]).unwrap();
+    prop.set_range_f32(0.01, f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("cap_max_height", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "channel_bg_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "channel_border_size",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_STYLE,
+    );
+    prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "channel_border_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
+    prop.set_array_len(4);
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("cap_max_height", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
     // "Copied link" overlay (right-click / long-hold on a URL)
-    let mut prop = Property::new("url_copy_text", PropertyType::Str, PropertySubType::Null);
+    let mut prop =
+        Property::new("url_copy_text", PropertyType::Str, PropertySubType::Null, PERM_APP);
     prop.set_defaults_str(vec!["Copied link".to_string()]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop =
-        Property::new("url_copy_fg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop = Property::new(
+        "url_copy_fg_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
-    prop.set_defaults_f32(vec![0., 0.94, 1., 1.]).unwrap();
+    prop.set_defaults_f32(vec![0.9, 0.9, 0.9, 1.]).unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop =
-        Property::new("url_copy_bg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop = Property::new(
+        "url_copy_bg_color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PERM_STYLE,
+    );
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
     prop.set_defaults_f32(vec![0.1, 0.1, 0.1, 0.9]).unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("url_copy_font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "url_copy_font_size",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_STYLE,
+    );
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("url_copy_padding", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "url_copy_padding",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_STYLE,
+    );
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("url_copy_offset", PropertyType::Float32, PropertySubType::Pixel);
+    let prop =
+        Property::new("url_copy_offset", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("url_copy_duration", PropertyType::Float32, PropertySubType::Null);
+    let mut prop =
+        Property::new("url_copy_duration", PropertyType::Float32, PropertySubType::Null, PERM_APP);
     prop.set_defaults_f32(vec![2.]).unwrap();
     node.add_property(prop).unwrap();
 
@@ -739,6 +1261,16 @@ pub fn create_privmsg_node(name: &str) -> SceneNode {
         "nick_clicked",
         "A nick was clicked",
         vec![("id", "Message ID", CallArgType::Hash), ("nick", "Nickname", CallArgType::Str)],
+    )
+    .unwrap();
+
+    node.add_signal(
+        "channel_clicked",
+        "A channel name was clicked",
+        vec![
+            ("id", "Message ID", CallArgType::Hash),
+            ("channel", "Channel name", CallArgType::Str),
+        ],
     )
     .unwrap();
 
@@ -782,12 +1314,19 @@ pub fn create_datemsg_node(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::DateMsgNode);
 
     // Null = inherit the chatview's font size.
-    let mut prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.allow_null_values();
     prop.set_defaults_null().unwrap();
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop = Property::new(
+        "color",
+        PropertyType::Float32,
+        PropertySubType::Color,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.set_range_f32(0., 1.);
     node.add_property(prop).unwrap();
@@ -798,13 +1337,13 @@ pub fn create_datemsg_node(name: &str) -> SceneNode {
 pub fn create_filemsg_node(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::FileMsgNode);
 
-    let prop = Property::new("max_height", PropertyType::Float32, PropertySubType::Pixel);
+    let prop = Property::new("max_height", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node.add_signal(
@@ -841,34 +1380,46 @@ pub fn create_filemsg_node(name: &str) -> SceneNode {
 pub fn create_emoji_picker(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::EmojiPicker);
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("scroll", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("scroll", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     prop.set_ui_text("Scroll", "Scroll down from the top");
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop =
-        Property::new("mouse_scroll_speed", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "mouse_scroll_speed",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PERM_APP,
+    );
     prop.set_ui_text("Mouse Scroll Speed", "Mouse Scrolling speed");
     prop.set_defaults_f32(vec![4.]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("emoji_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("emoji_size", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_ui_text("Emoji Size", "The emoji's size");
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("emoji_margin", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("emoji_margin", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_array_len(2);
     prop.set_ui_text("Emoji Margin", "Horizontal and vertical padding around each emoji icon");
     prop.set_range_f32(0., f32::MAX);
@@ -884,121 +1435,150 @@ pub fn create_emoji_picker(name: &str) -> SceneNode {
 pub fn create_menu(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Menu);
 
-    let mut prop = Property::new("is_visible", PropertyType::Bool, PropertySubType::Null);
+    let mut prop = Property::new("is_visible", PropertyType::Bool, PropertySubType::Null, PERM_APP);
     prop.set_defaults_bool(vec![true]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("scroll", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("scroll", PropertyType::Float32, PropertySubType::Pixel, PERM_RUNTIME);
     prop.set_ui_text("Scroll", "Scroll position from the top");
     prop.set_defaults_f32(vec![0.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Font Size", "Text font size in pixels");
     prop.set_defaults_f32(vec![22.0]).unwrap();
     prop.set_range_f32(1., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("padding", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("padding", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Padding", "Padding [left, top/bottom]");
     prop.set_array_len(2);
     prop.set_defaults_f32(vec![14.0, 14.0]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("handle_padding", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("handle_padding", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Handle Padding", "X handle padding from left edge");
     prop.set_defaults_f32(vec![14.0]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_ui_text("Text Color", "Text color (RGBA)");
     prop.set_array_len(4);
     prop.set_defaults_f32(vec![1., 1., 1., 1.]).unwrap();
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("bg_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("bg_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_ui_text("Background Color", "Item background color");
     prop.set_array_len(4);
     prop.set_defaults_f32(vec![0.1, 0.1, 0.1, 1.]).unwrap();
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("sep_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("sep_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
     prop.set_ui_text("Separator Size", "Separator line thickness");
     prop.set_defaults_f32(vec![1.0]).unwrap();
     prop.set_range_f32(0., f32::MAX);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("sep_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("sep_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_ui_text("Separator Color", "Separator line color");
     prop.set_array_len(4);
     prop.set_defaults_f32(vec![0.5, 0.5, 0.5, 0.3]).unwrap();
     prop.set_range_f32(0., 1.);
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("role1_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_ui_text("Role1 Color", "Text color for items in role1 group");
-    prop.set_array_len(4);
-    prop.set_defaults_f32(vec![0.36, 1., 0.51, 1.]).unwrap();
-    prop.set_range_f32(0., 1.);
-    node.add_property(prop).unwrap();
-
-    let mut prop = Property::new("role2_color", PropertyType::Float32, PropertySubType::Color);
-    prop.set_ui_text("Role2 Color", "Text color for items in role2 group");
-    prop.set_array_len(4);
-    prop.set_defaults_f32(vec![0.56, 0.61, 1., 1.]).unwrap();
-    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
     let mut prop =
-        Property::new("scroll_start_accel", PropertyType::Float32, PropertySubType::Null);
+        Property::new("role1_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Role1 Color", "Text color for items in role1 group");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0.62, 0.62, 0.62, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("role2_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
+    prop.set_ui_text("Role2 Color", "Text color for items in role2 group");
+    prop.set_array_len(4);
+    prop.set_defaults_f32(vec![0.78, 0.78, 0.78, 1.]).unwrap();
+    prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
+    node.add_property(prop).unwrap();
+
+    let mut prop =
+        Property::new("scroll_start_accel", PropertyType::Float32, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Scroll Start Acceleration", "Multiplier for initial scroll velocity");
     prop.set_defaults_f32(vec![1.0]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("scroll_resist", PropertyType::Float32, PropertySubType::Null);
+    let mut prop =
+        Property::new("scroll_resist", PropertyType::Float32, PropertySubType::Null, PERM_APP);
     prop.set_ui_text("Scroll Resistance", "Momentum decay factor (0-1, lower = faster stop)");
     prop.set_defaults_f32(vec![0.95]).unwrap();
     prop.set_range_f32(0., 1.);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("overscroll", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("overscroll", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_ui_text("Overscroll", "Extra scroll distance past the content bottom");
     prop.set_defaults_f32(vec![400.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("fade_zone", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("fade_zone", PropertyType::Float32, PropertySubType::Pixel, PERM_APP);
     prop.set_ui_text("Fade Zone", "Fade out items in the last X pixels");
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("items", PropertyType::Str, PropertySubType::Null);
+    let mut prop = Property::new("items", PropertyType::Str, PropertySubType::Null, PERM_CONTENT);
     prop.set_ui_text("Items", "Menu items");
     prop.set_unbounded();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("role1_group", PropertyType::Str, PropertySubType::Null);
+    let mut prop =
+        Property::new("role1_group", PropertyType::Str, PropertySubType::Null, PERM_CONTENT);
     prop.set_ui_text("Role1 Group", "Items colored with role1 color");
     prop.set_unbounded();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("role2_group", PropertyType::Str, PropertySubType::Null);
+    let mut prop =
+        Property::new("role2_group", PropertyType::Str, PropertySubType::Null, PERM_CONTENT);
     prop.set_ui_text("Role2 Group", "Items colored with role2 color");
     prop.set_unbounded();
     node.add_property(prop).unwrap();
@@ -1029,39 +1609,56 @@ pub fn create_menu(name: &str) -> SceneNode {
 pub fn create_tokentable(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::TokenTable);
 
-    let mut prop = Property::new("rect", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop = Property::new(
+        "rect",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     prop.set_array_len(4);
     prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("font_size", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("text_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("text_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_defaults_f32(vec![1., 1., 1., 1.]).unwrap();
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("separator_color", PropertyType::Float32, PropertySubType::Color);
+    let mut prop =
+        Property::new("separator_color", PropertyType::Float32, PropertySubType::Color, PERM_STYLE);
     prop.set_array_len(4);
     prop.set_defaults_f32(vec![0.3, 0.3, 0.3, 1.]).unwrap();
     prop.set_range_f32(0., 1.);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("column_spacing", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("column_spacing", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("padding_x", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("padding_x", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("padding_y", PropertyType::Float32, PropertySubType::Pixel);
+    let mut prop =
+        Property::new("padding_y", PropertyType::Float32, PropertySubType::Pixel, PERM_STYLE);
+    prop.allow_exprs();
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("z_index", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
-    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null);
+    let prop = Property::new("priority", PropertyType::Uint32, PropertySubType::Null, PERM_APP);
     node.add_property(prop).unwrap();
 
     node.add_signal(

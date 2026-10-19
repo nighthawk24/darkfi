@@ -22,6 +22,9 @@ pub use back_arrow::create_back_arrow;
 mod close;
 pub use close::create_close_icon;
 
+mod darkfi_logo;
+pub use darkfi_logo::create_darkfi_logo;
+
 mod send_arrow;
 pub use send_arrow::create_send_arrow;
 
@@ -40,6 +43,9 @@ pub use version_block::create_version_block;
 
 mod copy;
 pub use copy::create_copy;
+
+mod paste;
+pub use paste::create_paste;
 
 mod contacts_icon;
 pub use contacts_icon::create_contacts_icon;
@@ -66,8 +72,11 @@ pub use down_bgtab::create_down_bgtab;
 mod down_arrow;
 pub use down_arrow::create_down_arrow;
 
-//mod settings;
-//pub use settings::{create_right_border, create_settings};
+mod dropdown_arrow;
+pub use dropdown_arrow::create_dropdown_arrow;
+
+mod settings;
+pub use settings::create_settings;
 
 //mod switch;
 //pub use switch::create_switch;
@@ -83,3 +92,21 @@ pub use down_arrow::create_down_arrow;
 
 //mod reset;
 //pub use reset::create_reset;
+
+mod circle;
+pub use circle::create_circle;
+
+mod logo;
+pub use logo::create_logo;
+
+mod switch;
+pub use switch::create_switch;
+
+mod confirm;
+pub use confirm::create_confirm;
+
+mod reset;
+pub use reset::create_reset;
+
+mod slider_thumb;
+pub use slider_thumb::create_thumb;

@@ -34,16 +34,18 @@ use crate::{
     },
     expr::{self, Compiler},
     gfx::{gfxtag, Point, Renderer},
-    mesh::{rgba, COLOR_RED, COLOR_WHITE},
+    mesh::{rgba, COLOR_CYAN, COLOR_RED},
     prop::{
-        Property, PropertyAtomicGuard, PropertyBool, PropertyFloat32, PropertyStr, PropertySubType,
-        PropertyType, Role,
+        Property, PropertyAtomicGuard, PropertyBool, PropertyFloat32, PropertyPermission,
+        PropertyStr, PropertySubType, PropertyType, Role,
     },
     scene::{Pimpl, SceneNodePtr, Slot},
     shape,
+    theme::wire_color,
     ui::{
-        chatview::MessageId, emoji_picker, BaseEdit, BaseEditType, Button, ChatView, EmojiPicker,
-        Layer, RedrawTrigger, Shortcut, Text, VectorArt, VectorShape,
+        chatview::{MessageId, FEED_CHANNEL},
+        emoji_picker, BaseEdit, BaseEditType, Button, ChatView, EmojiPicker, Layer, RedrawTrigger,
+        Shortcut, Text, VectorArt, VectorShape,
     },
     util::{i18n::I18nBabelFish, unixtime},
     ExecutorPtr,
@@ -52,8 +54,6 @@ use crate::{
 use std::io::Cursor;
 
 use url::Url;
-
-use super::{ColorScheme, COLOR_SCHEME};
 
 #[cfg(any(target_os = "android", feature = "emulate-android"))]
 mod android_ui_consts {
@@ -88,6 +88,8 @@ mod android_ui_consts {
     pub const FONTSIZE: f32 = 50.;
     pub const TIMESTAMP_FONTSIZE: f32 = 30.;
     pub const TIMESTAMP_WIDTH: f32 = 135.;
+    /// Default timestamp→line / chip spacing (the shipped look).
+    pub const CHANNEL_SPACING: f32 = 45.;
     pub const MESSAGE_SPACING: f32 = 15.;
     pub const LINE_HEIGHT: f32 = 58.;
     pub const CHATVIEW_BASELINE: f32 = 36.;
@@ -105,10 +107,9 @@ mod android_ui_consts {
     // Action menu
     pub const ACTION_PADDING: f32 = 32.;
     pub const ACTION_SPACING: f32 = 8.;
-    pub const BACK_SEP_W: f32 = 1.;
 
-    pub const COPY_BTN_SCALE: f32 = 40.;
-    pub const COPY_BTN_X_OFF: f32 = 60.;
+    pub const COPY_BTN_SCALE: f32 = 38.;
+    pub const COPY_BTN_X_OFF: f32 = 70.;
     pub const COPY_BTN_Y: f32 = 70.;
 
     pub const SELECT_CLOSE_X: f32 = 70.;
@@ -126,12 +127,12 @@ mod android_ui_consts {
 }
 
 #[cfg(target_os = "android")]
-mod ui_consts {
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
 #[cfg(feature = "emulate-android")]
-mod ui_consts {
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
@@ -139,10 +140,10 @@ mod ui_consts {
     any(target_os = "linux", target_os = "macos", target_os = "windows"),
     not(feature = "emulate-android")
 ))]
-mod ui_consts {
+pub mod ui_consts {
     // Chat UI
     pub const CHANNEL_LABEL_X: f32 = 100.;
-    pub const CHANNEL_LABEL_Y: f32 = 12.;
+    pub const CHANNEL_LABEL_Y: f32 = 14.;
     pub const BACKARROW_SCALE: f32 = 15.;
     pub const BACKARROW_X: f32 = 38.;
     pub const BACKARROW_Y: f32 = 30.;
@@ -172,6 +173,8 @@ mod ui_consts {
     pub const FONTSIZE: f32 = 25.;
     pub const TIMESTAMP_FONTSIZE: f32 = 12.;
     pub const TIMESTAMP_WIDTH: f32 = 60.;
+    /// Default timestamp→line / chip spacing (the shipped look).
+    pub const CHANNEL_SPACING: f32 = 24.;
     pub const MESSAGE_SPACING: f32 = 5.;
     pub const LINE_HEIGHT: f32 = 30.;
     pub const CHATVIEW_BASELINE: f32 = 20.;
@@ -189,11 +192,10 @@ mod ui_consts {
     // Action menu
     pub const ACTION_PADDING: f32 = 8.;
     pub const ACTION_SPACING: f32 = 4.;
-    pub const BACK_SEP_W: f32 = 0.5;
 
-    pub const COPY_BTN_SCALE: f32 = 20.;
+    pub const COPY_BTN_SCALE: f32 = 19.;
     pub const COPY_BTN_X_OFF: f32 = 30.;
-    pub const COPY_BTN_Y: f32 = 27.;
+    pub const COPY_BTN_Y: f32 = 30.;
 
     pub const SELECT_CLOSE_X: f32 = 40.;
     pub const SELECT_CLOSE_Y: f32 = 30.;
@@ -243,9 +245,13 @@ pub async fn make(
     emoji_meshes: emoji_picker::EmojiMeshesPtr,
     redraw: RedrawTrigger,
 ) -> SceneNodePtr {
-    let window_scale =
-        PropertyFloat32::wrap(&sg_root.lookup_node("/window").unwrap(), Role::Internal, "scale", 0)
-            .unwrap();
+    let window_scale = PropertyFloat32::wrap(
+        &sg_root.lookup_node("/setting").unwrap(),
+        Role::Internal,
+        "win.scale",
+        0,
+    )
+    .unwrap();
     let atom = &mut PropertyAtomicGuard::none();
 
     let mut cc = Compiler::new();
@@ -270,106 +276,27 @@ pub async fn make(
     // Main view
     let layer_node = create_layer("main_chat_layer");
     let prop = layer_node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     layer_node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     layer_node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
     let layer_node = layer_node.setup(|me| Layer::new(me, renderer.clone(), redraw.clone())).await;
     content.link(layer_node.clone());
 
-    // Create a bg mesh on top to fade the bg image
-    let node = create_vector_art("bg");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
-    let mut shape = VectorShape::new();
-    shape.add_gradient_box(
-        expr::const_f32(0.),
-        expr::const_f32(0.),
-        expr::load_var("w"),
-        expr::load_var("h"),
-        [[0., 0., 0., 0.5], [0., 0., 0., 0.5], [0., 0., 0., 0.5], [0., 0., 0., 0.8]],
-    );
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
-    let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
-    layer_node.link(node);
-
-    // Create the toolbar bg
-    let node = create_vector_art("toolbar_bg");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
-
-    let (bg_color, sep_color) = match COLOR_SCHEME {
-        ColorScheme::DarkMode => ([0., 0., 0., 1.], [0.41, 0.6, 0.65, 1.]),
-        ColorScheme::PaperLight => ([1., 1., 1., 1.], [0., 0.6, 0.65, 1.]),
-    };
-    let mut shape = VectorShape::new();
-    shape.add_filled_box(
-        expr::const_f32(0.),
-        expr::const_f32(0.),
-        expr::load_var("w"),
-        expr::load_var("h"),
-        bg_color,
-    );
-    shape.add_filled_box(
-        expr::const_f32(0.),
-        expr::const_f32(0.),
-        expr::const_f32(BACKARROW_BG_W),
-        expr::load_var("h"),
-        [0.0, 0.106, 0.114, 1.0],
-    );
-    shape.add_filled_box(
-        expr::const_f32(BACKARROW_BG_W),
-        expr::const_f32(0.),
-        expr::const_f32(BACKARROW_BG_W + BACK_SEP_W),
-        expr::load_var("h"),
-        sep_color,
-    );
-    shape.add_filled_box(
-        expr::const_f32(0.),
-        expr::load_var("h"),
-        expr::load_var("w"),
-        cc.compile("h + 0.5").unwrap(),
-        sep_color,
-    );
-    let color1 = [0., 0.17, 0.18, 0.5];
-    let color2 = [0., 0.88, 1., 0.];
-    shape.add_smooth_vertical_gradient(
-        expr::const_f32(BACKARROW_BG_W + 1.),
-        expr::const_f32(0.),
-        expr::load_var("w"),
-        cc.compile("h / 2").unwrap(),
-        color1,
-        color2,
-        8,
-        0.2,
-    );
-
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
-
-    let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
-    layer_node.link(node);
-
     // Create the send button
     let node = create_vector_art("back_btn_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, BACKARROW_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, BACKARROW_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, BACKARROW_SCALE).unwrap();
-    prop.set_f32(atom, Role::App, 3, BACKARROW_SCALE).unwrap();
+    prop.set_default_f32(0, BACKARROW_X).unwrap();
+    prop.set_default_f32(1, BACKARROW_Y).unwrap();
+    prop.set_default_f32(2, BACKARROW_SCALE).unwrap();
+    prop.set_default_f32(3, BACKARROW_SCALE).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
 
-    let shape = shape::create_back_arrow().scaled(BACKARROW_SCALE);
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let shape = shape::create_back_arrow([0., 1., 1., 1.]).scaled(BACKARROW_SCALE);
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let back_btn_bg_node =
         node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
     layer_node.link(back_btn_bg_node.clone());
@@ -378,10 +305,10 @@ pub async fn make(
     let node = create_button("back_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, BACKARROW_BG_W).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, BACKARROW_BG_W).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
 
     // Menu doesn't exist yet ;)
     // So look it up in the callback.
@@ -447,24 +374,14 @@ pub async fn make(
     // Create some text
     let node = create_text("channel_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CHANNEL_LABEL_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, CHANNEL_LABEL_Y).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", FONTSIZE).unwrap();
-    node.set_property_str(atom, Role::App, "text", "").unwrap();
+    prop.set_default_f32(0, CHANNEL_LABEL_X).unwrap();
+    prop.set_default_f32(1, CHANNEL_LABEL_Y).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
+    //node.set_property_str(atom, Role::App, "text", "").unwrap();
     let prop = node.get_property("text_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
+    prop.set_default_f32_multi(&[1., 1., 1., 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
 
     let label_node = node
@@ -476,23 +393,28 @@ pub async fn make(
 
     // Create the emoji picker
     let mut node = create_emoji_picker("emoji_picker");
-    let prop = Property::new("dynamic_h", PropertyType::Float32, PropertySubType::Pixel);
+    let prop = Property::new(
+        "dynamic_h",
+        PropertyType::Float32,
+        PropertySubType::Pixel,
+        PropertyPermission::default(),
+    );
     node.add_property(prop).unwrap();
     let emoji_dynamic_h_prop = node.get_property("dynamic_h").unwrap();
-    //emoji_dynamic_h_prop.set_f32(atom, Role::App, 0, 400.).unwrap();
+    //emoji_dynamic_h_prop.set_default_f32(0, 400.).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
     let code = cc.compile("h - dynamic_h").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("dynamic_h")).unwrap();
-    prop.add_depend(&emoji_dynamic_h_prop, 0, "dynamic_h");
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("dynamic_h")).unwrap();
+    prop.add_depend(Role::App, &emoji_dynamic_h_prop, 0, "dynamic_h");
     let emoji_h_prop = PropertyFloat32::wrap(&node, Role::App, "dynamic_h", 0).unwrap();
-    //node.set_property_f32(atom, Role::App, "font_size", FONTSIZE).unwrap();
+    //node.get_property("font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
     node.set_property_f32(atom, Role::App, "emoji_size", EMOJI_PICKER_ICON_SIZE).unwrap();
     let prop = node.get_property("emoji_margin").unwrap();
-    prop.set_f32(atom, Role::App, 0, EMOJI_PICKER_ICON_MARGIN_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, EMOJI_PICKER_ICON_MARGIN_Y).unwrap();
+    prop.set_default_f32(0, EMOJI_PICKER_ICON_MARGIN_X).unwrap();
+    prop.set_default_f32(1, EMOJI_PICKER_ICON_MARGIN_Y).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let node =
         node.setup(|me| EmojiPicker::new(me, renderer.clone(), emoji_meshes, redraw.clone())).await;
@@ -502,12 +424,12 @@ pub async fn make(
     // Create the editbox bg
     let node = create_vector_art("emoji_picker_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
     let code = cc.compile("h - dynamic_h").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("dynamic_h")).unwrap();
-    prop.add_depend(&emoji_dynamic_h_prop, 0, "dynamic_h");
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("dynamic_h")).unwrap();
+    prop.add_depend(Role::App, &emoji_dynamic_h_prop, 0, "dynamic_h");
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
 
     let mut shape = VectorShape::new();
@@ -543,12 +465,12 @@ pub async fn make(
     let chat_layer_node = layer_node;
     let layer_node = create_layer("content");
     let prop = layer_node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
     let code = cc.compile("h - emoji_h").unwrap();
-    prop.set_expr(atom, Role::App, 3, code).unwrap();
-    prop.add_depend(&emoji_dynamic_h_prop, 0, "emoji_h");
+    prop.set_default_expr(3, code).unwrap();
+    prop.add_depend(Role::App, &emoji_dynamic_h_prop, 0, "emoji_h");
     layer_node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     layer_node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
     layer_node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
@@ -558,52 +480,31 @@ pub async fn make(
     // ChatView
     let node = create_chatview("chatty");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 10.).unwrap();
-    prop.set_f32(atom, Role::App, 1, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_f32(0, 10.).unwrap();
+    prop.set_default_f32(1, CHATEDIT_HEIGHT).unwrap();
     let code = cc.compile("w - 30").unwrap();
-    prop.set_expr(atom, Role::App, 2, code).unwrap();
+    prop.set_default_expr(2, code).unwrap();
     let code = cc.compile("h - CHATEDIT_HEIGHT - editz_h - 2 * CHATEDIT_BOTTOM_PAD").unwrap();
-    prop.set_expr(atom, Role::App, 3, code).unwrap();
+    prop.set_default_expr(3, code).unwrap();
     let chatview_rect_prop = prop.clone();
-    node.set_property_f32(atom, Role::App, "font_size", FONTSIZE).unwrap();
-    node.set_property_f32(atom, Role::App, "timestamp_font_size", TIMESTAMP_FONTSIZE).unwrap();
-    node.set_property_f32(atom, Role::App, "timestamp_width", TIMESTAMP_WIDTH).unwrap();
-    node.set_property_f32(atom, Role::App, "line_height", LINE_HEIGHT).unwrap();
-    node.set_property_f32(atom, Role::App, "message_spacing", MESSAGE_SPACING).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
+    node.get_property("timestamp_font_size")
+        .unwrap()
+        .set_default_f32(0, TIMESTAMP_FONTSIZE)
+        .unwrap();
+    node.get_property("timestamp_width").unwrap().set_default_f32(0, TIMESTAMP_WIDTH).unwrap();
+    node.get_property("line_height").unwrap().set_default_f32(0, LINE_HEIGHT).unwrap();
+    node.get_property("message_spacing").unwrap().set_default_f32(0, MESSAGE_SPACING).unwrap();
     node.set_property_f32(atom, Role::App, "wheel_page_frac", 0.2).unwrap();
-    node.set_property_f32(atom, Role::App, "baseline", CHATVIEW_BASELINE).unwrap();
+    node.get_property("baseline").unwrap().set_default_f32(0, CHATVIEW_BASELINE).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
 
-    let prop = node.get_property("timestamp_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.407).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.604).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.647).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    let prop = node.get_property("text_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
-
-    let prop = node.get_property("hi_bg_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.2).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.2).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
+    // Class wiring onto the shared /theme tokens: the chatview tracks
+    // the active palette from here on (minimal palette while unloaded).
+    let theme = sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "timestamp_color", &theme, "chatview.timestamp_color").unwrap();
+    wire_color(&node, "text_color", &theme, "chatview.text_color").unwrap();
+    wire_color(&node, "hi_bg_color", &theme, "chatview.hi_bg_color").unwrap();
 
     let chatview_node = node
         .setup(|me| {
@@ -620,22 +521,38 @@ pub async fn make(
         .await;
     layer_node.link(chatview_node.clone());
 
-    let tree_name = "#dev__chat_tree_v2";
+    let tree_name = "#dev__chat_tree_v3";
     let tree = kv_db.open_tree_default(&tree_name).unwrap();
     if tree.is_empty().expect("cannot read dev chat tree") {
         populate_tree(&tree);
     }
 
-    // The label follows the bound channel.
+    // The feed tree mirrors the fixture (interleaved across a few
+    // channels) so the `*` view has labeled, mixed-room content to
+    // test with before any live traffic arrives.
+    let feed_tree = kv_db.open_tree_default(&ChatView::tree_name(FEED_CHANNEL)).unwrap();
+    if feed_tree.is_empty().expect("cannot read feed chat tree") {
+        populate_feed_tree(&feed_tree);
+    }
+
+    // The label follows the bound channel; the feed binding also
+    // forces channel names on (the feed is unread without them).
     {
         let channel_prop = PropertyStr::wrap(&chatview_node, Role::App, "channel", 0).unwrap();
         let channel_sub = channel_prop.prop().subscribe_modify();
         let label_text = PropertyStr::wrap(&label_node, Role::App, "text", 0).unwrap();
+        let show_channel_prop =
+            PropertyBool::wrap(&chatview_node, Role::App, "show_channel", 0).unwrap();
         let redraw2 = redraw.clone();
         let label_task = ex.spawn(async move {
             while let Ok(_) = channel_sub.receive().await {
                 let atom = &mut redraw2.make_guard(gfxtag!("channel label"));
-                label_text.set(atom, channel_prop.get());
+                let channel = channel_prop.get();
+                label_text.set(atom, channel.clone());
+                let shown = channel == FEED_CHANNEL;
+                if show_channel_prop.get() != shown {
+                    show_channel_prop.set(atom, shown);
+                }
             }
         });
         chatview_node.push_task(label_task);
@@ -644,41 +561,47 @@ pub async fn make(
     // Type-specific styling lives on the privmsg type sub-node.
     let privmsg_node = chatview_node.lookup_node("/privmsg").expect("privmsg type node");
     privmsg_node.set_property_f32(atom, Role::App, "cap_max_height", 1000.).unwrap();
-    let prop = privmsg_node.get_property("action_text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.25).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.75).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    let prop = privmsg_node.get_property("url_text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.94).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    wire_color(&privmsg_node, "action_text_color", &theme, "chatview.action_text_color").unwrap();
+    wire_color(&privmsg_node, "url_text_color", &theme, "chatview.url_text_color").unwrap();
+
+    // Channel label styling: text color follows the shared token; the
+    // chip gets a visible bg + border. Font size and spacing match the
+    // timestamp size / the shipped timestamp→line gap now that the
+    // fixed gutter no longer drives the body indent.
+    wire_color(&privmsg_node, "channel_color", &theme, "chatview.channel_color").unwrap();
+    let prop = privmsg_node.get_property("channel_bg_color").unwrap();
+    prop.set_default_f32_multi(&rgba!(0x263B3Cff)).unwrap();
+    let prop = privmsg_node.get_property("channel_border_color").unwrap();
+    prop.set_default_f32_multi(&rgba!(0x689AA5ff)).unwrap();
+    privmsg_node.get_property("channel_border_size").unwrap().set_default_f32(0, 1.).unwrap();
+    privmsg_node
+        .get_property("channel_font_size")
+        .unwrap()
+        .set_default_f32(0, TIMESTAMP_FONTSIZE)
+        .unwrap();
+    privmsg_node
+        .get_property("channel_spacing")
+        .unwrap()
+        .set_default_f32(0, CHANNEL_SPACING)
+        .unwrap();
+
     let prop = privmsg_node.get_property("url_bg_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.13).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.08).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    privmsg_node.set_property_f32(atom, Role::App, "url_bg_border_size", 1.).unwrap();
+    prop.set_default_f32_multi(&[0., 0.13, 0.08, 1.]).unwrap();
+    privmsg_node.get_property("url_bg_border_size").unwrap().set_default_f32(0, 1.).unwrap();
     let prop = privmsg_node.get_property("url_bg_border_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.11).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.6).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.63).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0.11, 0.6, 0.63, 1.]).unwrap();
 
     // "Copied link" overlay styling (mirrors the edit action menu)
     let prop = privmsg_node.get_property("url_copy_fg_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.94).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0., 0.94, 1., 1.]).unwrap();
     let prop = privmsg_node.get_property("url_copy_bg_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.1).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.1).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.1).unwrap();
-    prop.set_f32(atom, Role::App, 3, 0.9).unwrap();
-    privmsg_node.set_property_f32(atom, Role::App, "url_copy_font_size", FONTSIZE).unwrap();
-    privmsg_node.set_property_f32(atom, Role::App, "url_copy_padding", ACTION_PADDING).unwrap();
+    prop.set_default_f32_multi(&[0.1, 0.1, 0.1, 0.9]).unwrap();
+    privmsg_node.get_property("url_copy_font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
+    privmsg_node
+        .get_property("url_copy_padding")
+        .unwrap()
+        .set_default_f32(0, ACTION_PADDING)
+        .unwrap();
     privmsg_node.set_property_f32(atom, Role::App, "url_copy_offset", ACTION_PADDING).unwrap();
     let prop = privmsg_node.get_property("nick_colors").unwrap();
     #[rustfmt::skip]
@@ -694,18 +617,39 @@ pub async fn make(
         1.00, 0.36, 0.48, 1.,
         1.00, 0.30, 0.00, 1.
     ];
-    for c in nick_colors {
-        prop.push_f32(atom, Role::App, c).unwrap();
+    prop.set_default_f32_multi(&nick_colors).unwrap();
+
+    // Clicking a rendered channel name navigates to that channel
+    // (one chat screen, retargeted).
+    {
+        let (slot, recvr) = Slot::new("channel_nav");
+        privmsg_node.register("channel_clicked", slot).unwrap();
+        let chatview_node2 = chatview_node.clone();
+        let listen_channel = ex.spawn(async move {
+            while let Ok(data) = recvr.recv().await {
+                let mut cur = Cursor::new(&data);
+                let Ok(_id) = MessageId::decode(&mut cur) else { continue };
+                let Ok(channel) = String::decode(&mut cur) else { continue };
+                if channel == FEED_CHANNEL {
+                    continue
+                }
+                let mut chan_data = vec![];
+                channel.encode(&mut chan_data).unwrap();
+                let _ = chatview_node2.call_method("set_channel", chan_data).await;
+            }
+        });
+        layer_node.push_task(listen_channel);
     }
 
     // Date separator styling.
     let datemsg_node = chatview_node.lookup_node("/datemsg").expect("datemsg type node");
-    datemsg_node.set_property_f32(atom, Role::App, "font_size", CHATVIEW_DATE_FONTSIZE).unwrap();
+    datemsg_node
+        .get_property("font_size")
+        .unwrap()
+        .set_default_f32(0, CHATVIEW_DATE_FONTSIZE)
+        .unwrap();
     let prop = datemsg_node.get_property("color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0.5, 0.5, 0.5, 1.]).unwrap();
 
     // File signals live on the filemsg type node. The download request
     // payload carries (id, url); the fud plugin takes the url.
@@ -743,11 +687,11 @@ pub async fn make(
     let down_layer = create_layer("chat_down_arrow");
     let prop = down_layer.get_property("rect").unwrap();
     let code = cc.compile("w - DOWNARROW_NEG_X").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
+    prop.set_default_expr(0, code).unwrap();
     let code = cc.compile("h - DOWNARROW_NEG_Y").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, DOWNARROW_W).unwrap();
-    prop.set_f32(atom, Role::App, 3, DOWNARROW_H).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, DOWNARROW_W).unwrap();
+    prop.set_default_f32(3, DOWNARROW_H).unwrap();
     down_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     down_layer.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
     // The arrow floats over the chatview (priority 0) — it must be
@@ -775,10 +719,10 @@ pub async fn make(
     // Placeholder single-color background filling the whole overlay
     let node = create_vector_art("downbg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, DOWNBG_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, DOWNBG_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, DOWNARROW_W).unwrap();
-    prop.set_f32(atom, Role::App, 3, DOWNARROW_H).unwrap();
+    prop.set_default_f32(0, DOWNBG_X).unwrap();
+    prop.set_default_f32(1, DOWNBG_Y).unwrap();
+    prop.set_default_f32(2, DOWNARROW_W).unwrap();
+    prop.set_default_f32(3, DOWNARROW_H).unwrap();
     node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
     let mut shape =
@@ -792,10 +736,10 @@ pub async fn make(
     let node = create_button("scroll_bottom_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, DOWNARROW_W).unwrap();
-    prop.set_f32(atom, Role::App, 3, DOWNARROW_H).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, DOWNARROW_W).unwrap();
+    prop.set_default_f32(3, DOWNARROW_H).unwrap();
     let (slot, recvr) = Slot::new("scroll_bottom");
     node.register("click", slot).unwrap();
     let chatview_node2 = chatview_node.clone();
@@ -815,10 +759,10 @@ pub async fn make(
     // (over `back_btn`) and `copy_btn` (over the reconnect button).
     let select_layer = create_layer("select_layer");
     let prop = select_layer.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
     select_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     select_layer.set_property_u32(atom, Role::App, "z_index", 100).unwrap();
     select_layer.set_property_u32(atom, Role::App, "priority", 100).unwrap();
@@ -829,10 +773,10 @@ pub async fn make(
     // Background box covering the back button
     let node = create_vector_art("select_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
     let mut shape = VectorShape::new();
     shape.add_filled_box(
@@ -855,12 +799,12 @@ pub async fn make(
     let node = create_vector_art("copy_bg");
     let prop = node.get_property("rect").unwrap();
     let code = cc.compile("w - COPY_BTN_X_OFF").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
-    prop.set_f32(atom, Role::App, 1, COPY_BTN_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 400.).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, COPY_BTN_Y).unwrap();
+    prop.set_default_f32(2, 400.).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
-    let shape = shape::create_copy(COLOR_WHITE).scaled(COPY_BTN_SCALE);
+    let shape = shape::create_copy(COLOR_CYAN).scaled(COPY_BTN_SCALE);
     node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
     let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
     select_layer.link(node);
@@ -869,10 +813,10 @@ pub async fn make(
     let node = create_button("unselect_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, EMOJI_BG_W).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, EMOJI_BG_W).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
     {
         let chatview_node2 = chatview_node.clone();
         let (slot, recvr) = Slot::new("unselect_clicked");
@@ -893,10 +837,10 @@ pub async fn make(
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
     let code = cc.compile("w - NETSTATUS_ICON_SIZE").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, super::NETSTATUS_ICON_SIZE).unwrap();
-    prop.set_f32(atom, Role::App, 3, super::NETSTATUS_ICON_SIZE).unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, super::NETSTATUS_ICON_SIZE).unwrap();
+    prop.set_default_f32(3, super::NETSTATUS_ICON_SIZE).unwrap();
     {
         let chatview_node2 = chatview_node.clone();
         let (slot, recvr) = Slot::new("copy_clicked");
@@ -938,23 +882,18 @@ pub async fn make(
     // Create the editbox bg
     let node = create_vector_art("editbox_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
     let code = cc.compile("h - editz_h - 2 * CHATEDIT_BOTTOM_PAD").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
     let code = cc.compile("editz_h + 2 * CHATEDIT_BOTTOM_PAD").unwrap();
-    prop.set_expr(atom, Role::App, 3, code).unwrap();
+    prop.set_default_expr(3, code).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 4).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 2).unwrap();
 
     let editbox_bg_rect_prop = prop.clone();
 
-    let (bg_color, lhs_bg_color, line_color) = match COLOR_SCHEME {
-        ColorScheme::DarkMode => {
-            ([0., 0.13, 0.08, 1.], [0., 0.11, 0.11, 1.], [0.41, 0.6, 0.65, 1.])
-        }
-        ColorScheme::PaperLight => ([1., 1., 1., 1.], [1., 1., 1., 1.], [0., 0., 0., 1.]),
-    };
+    let (bg_color, line_color) = ([0., 0.13, 0.08, 1.], [0.41, 0.6, 0.65, 1.]);
 
     let mut shape = VectorShape::new();
     // Main green background
@@ -988,15 +927,8 @@ pub async fn make(
         // Color
         [0., 0.28, 0.2, 1.],
     );
-    // Bottom line
-    //shape.add_filled_box(
-    //    expr::const_f32(0.),
-    //    cc.compile("h - 1").unwrap(),
-    //    expr::load_var("w"),
-    //    expr::load_var("h"),
-    //    [0.41, 0.6, 0.65, 1.],
-    //);
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
     layer_node.link(node);
 
@@ -1004,33 +936,31 @@ pub async fn make(
     let node = create_vector_art("send_btn_bg");
     let prop = node.get_property("rect").unwrap();
     let code = cc.compile("w - SENDARROW_NEG_X").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
+    prop.set_default_expr(0, code).unwrap();
     let code = cc.compile("h - SENDARROW_NEG_Y").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, 500.).unwrap();
+    prop.set_default_f32(3, 500.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 5).unwrap();
-    let shape = shape::create_send_arrow().scaled(EMOJI_SCALE);
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let shape = shape::create_send_arrow([0., 1., 1., 1.]).scaled(EMOJI_SCALE);
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
     layer_node.link(node);
 
     // Create the emoji button
     let node = create_vector_art("emoji_btn_bg");
-    let emoji_btn_is_visible = PropertyBool::wrap(&node, Role::Ignored, "is_visible", 0).unwrap();
+    let emoji_btn_is_visible = PropertyBool::wrap(&node, Role::App, "is_visible", 0).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, EMOJI_BTN_X).unwrap();
+    prop.set_default_f32(0, EMOJI_BTN_X).unwrap();
     let code = cc.compile("h - EMOJI_NEG_Y").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, 500.).unwrap();
+    prop.set_default_f32(3, 500.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 5).unwrap();
-    let color = match COLOR_SCHEME {
-        ColorScheme::DarkMode => [0., 1., 1., 1.],
-        ColorScheme::PaperLight => [0., 0., 0., 1.],
-    };
-    let shape = shape::create_emoji_selector(color).scaled(EMOJI_SCALE);
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let shape = shape::create_emoji_selector([0., 1., 1., 1.]).scaled(EMOJI_SCALE);
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
     layer_node.link(node);
 
@@ -1038,15 +968,16 @@ pub async fn make(
     let node = create_vector_art("emoji_close_btn_bg");
     node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     let prop = node.get_property("rect").unwrap();
-    let emoji_close_is_visible = PropertyBool::wrap(&node, Role::Ignored, "is_visible", 0).unwrap();
-    prop.set_f32(atom, Role::App, 0, EMOJI_BTN_X).unwrap();
+    let emoji_close_is_visible = PropertyBool::wrap(&node, Role::App, "is_visible", 0).unwrap();
+    prop.set_default_f32(0, EMOJI_BTN_X).unwrap();
     let code = cc.compile("h - EMOJI_NEG_Y").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, 500.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 500.).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, 500.).unwrap();
+    prop.set_default_f32(3, 500.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 5).unwrap();
-    let shape = shape::create_close_icon().scaled(EMOJI_CLOSE_SCALE);
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let shape = shape::create_close_icon([0., 1., 1., 1.]).scaled(EMOJI_CLOSE_SCALE);
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let node = node.setup(|me| VectorArt::new(me, renderer.clone(), redraw.clone())).await;
     layer_node.link(node);
 
@@ -1056,87 +987,52 @@ pub async fn make(
     node.set_property_bool(atom, Role::App, "is_focused", true).unwrap();
 
     let prop = node.get_property("height_range").unwrap();
-    prop.set_f32(atom, Role::App, 0, CHATEDIT_MIN_HEIGHT).unwrap();
-    prop.set_f32(atom, Role::App, 1, CHATEDIT_MAX_HEIGHT).unwrap();
+    prop.set_default_f32(0, CHATEDIT_MIN_HEIGHT).unwrap();
+    prop.set_default_f32(1, CHATEDIT_MAX_HEIGHT).unwrap();
 
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CHATEDIT_LHS_PAD).unwrap();
+    prop.set_default_f32(0, CHATEDIT_LHS_PAD).unwrap();
     let code = cc.compile("parent_h - (rect_h + CHATEDIT_BOTTOM_PAD)").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
+    prop.set_default_expr(1, code).unwrap();
     let code = cc.compile("parent_w - CHATEDIT_NEG_W").unwrap();
-    prop.set_expr(atom, Role::App, 2, code).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHATEDIT_HEIGHT).unwrap();
+    prop.set_default_expr(2, code).unwrap();
+    prop.set_default_f32(3, CHATEDIT_HEIGHT).unwrap();
 
-    chatview_rect_prop.add_depend(&prop, 3, "editz_h");
-    editbox_bg_rect_prop.add_depend(&prop, 3, "editz_h");
+    chatview_rect_prop.add_depend(Role::App, &prop, 3, "editz_h");
+    editbox_bg_rect_prop.add_depend(Role::App, &prop, 3, "editz_h");
 
     let prop = node.get_property("padding").unwrap();
-    prop.set_f32(atom, Role::App, 0, TEXTBAR_BASELINE * 0.4).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, TEXTBAR_BASELINE / 2.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 0.).unwrap();
+    prop.set_default_f32(0, TEXTBAR_BASELINE * 0.4).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, TEXTBAR_BASELINE / 2.).unwrap();
+    prop.set_default_f32(3, 0.).unwrap();
 
-    node.set_property_f32(atom, Role::App, "baseline", TEXTBAR_BASELINE).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", FONTSIZE).unwrap();
+    node.get_property("baseline").unwrap().set_default_f32(0, TEXTBAR_BASELINE).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
     //node.set_property_str(atom, Role::App, "text", "hello king!😁🍆jelly 🍆1234").unwrap();
-    let prop = node.get_property("text_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
-    let prop = node.get_property("text_hi_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.44).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.96).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    // Class wiring onto the shared /theme tokens: the composer tracks
+    // the active palette from here on (minimal palette while unloaded).
+    let theme = sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "text_color", &theme, "edit.text_color").unwrap();
+    wire_color(&node, "text_hi_color", &theme, "edit.text_hi_color").unwrap();
+    wire_color(&node, "cursor_color", &theme, "edit.cursor_color").unwrap();
+    wire_color(&node, "hi_bg_color", &theme, "edit.hi_bg_color").unwrap();
+    wire_color(&node, "cmd_bg_color", &theme, "edit.hi_bg_color").unwrap();
+    wire_color(&node, "action_fg_color", &theme, "edit.action_fg_color").unwrap();
+    wire_color(&node, "action_bg_color", &theme, "edit.action_bg_color").unwrap();
     let prop = node.get_property("text_cmd_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.64).unwrap();
-    prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.83).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    let prop = node.get_property("cursor_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.816).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.627).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0.64, 1., 0.83, 1.]).unwrap();
     node.set_property_f32(atom, Role::App, "cursor_ascent", CHATEDIT_CURSOR_ASCENT).unwrap();
     node.set_property_f32(atom, Role::App, "cursor_descent", CHATEDIT_CURSOR_DESCENT).unwrap();
     node.set_property_f32(atom, Role::App, "select_ascent", CHATEDIT_SELECT_ASCENT).unwrap();
     node.set_property_f32(atom, Role::App, "select_descent", CHATEDIT_SELECT_DESCENT).unwrap();
     node.set_property_f32(atom, Role::App, "handle_descent", CHATEDIT_HANDLE_DESCENT).unwrap();
-    node.set_property_f32(atom, Role::App, "action_padding", ACTION_PADDING).unwrap();
-    node.set_property_f32(atom, Role::App, "action_spacing", ACTION_SPACING).unwrap();
+    node.get_property("action_padding").unwrap().set_default_f32(0, ACTION_PADDING).unwrap();
+    node.get_property("action_spacing").unwrap().set_default_f32(0, ACTION_SPACING).unwrap();
     let prop = node.get_property("hi_bg_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.27).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.22).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
+    prop.set_default_f32_multi(&[0., 0.27, 0.22, 1.]).unwrap();
     let prop = node.get_property("cmd_bg_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.5).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.30).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.25).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
+    prop.set_default_f32_multi(&[0., 0.30, 0.25, 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 6).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 3).unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
@@ -1216,16 +1112,16 @@ pub async fn make(
     // Create the editbox fg shadow
     let node = create_vector_art("editbox_fg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, EMOJI_BG_W).unwrap();
+    prop.set_default_f32(0, EMOJI_BG_W).unwrap();
     let code = cc.compile("editz_bg_top_y").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_f32(atom, Role::App, 3, 300.).unwrap();
-    //prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    //prop.set_expr(atom, Role::App, 3, expr::load_var("editz_bg_h")).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_f32(3, 300.).unwrap();
+    //prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    //prop.set_default_expr(3, expr::load_var("editz_bg_h")).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 4).unwrap();
-    prop.add_depend(&editbox_bg_rect_prop, 1, "editz_bg_top_y");
-    prop.add_depend(&editbox_bg_rect_prop, 3, "editz_bg_h");
+    prop.add_depend(Role::App, &editbox_bg_rect_prop, 1, "editz_bg_top_y");
+    prop.add_depend(Role::App, &editbox_bg_rect_prop, 3, "editz_bg_h");
 
     let mut shape = VectorShape::new();
     // Left hand darker box
@@ -1235,10 +1131,10 @@ pub async fn make(
         expr::load_var("w"),
         expr::const_f32(40.),
         [
-            [0., 0., 0., 1.],
-            [0., 0., 0., 1.],
             [0., 0., 0., 0.],
             [0., 0., 0., 0.],
+            [0., 0., 0., 1.],
+            [0., 0., 0., 1.],
         ]
     );
     node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
@@ -1252,11 +1148,11 @@ pub async fn make(
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
     let code = cc.compile("w - SENDBTN_BOX_0").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
+    prop.set_default_expr(0, code).unwrap();
     let code = cc.compile("h - SENDBTN_BOX_1").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, SENDBTN_BOX[2]).unwrap();
-    prop.set_f32(atom, Role::App, 3, SENDBTN_BOX[3]).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, SENDBTN_BOX[2]).unwrap();
+    prop.set_default_f32(3, SENDBTN_BOX[3]).unwrap();
 
     let editz_text2 = editz_text.clone();
     let sg_root2 = sg_root.clone();
@@ -1269,7 +1165,6 @@ pub async fn make(
         async move {
             let mut text = editz_text.get();
             let channel = chatview_node.get_property_str("channel").unwrap_or_default();
-            let privmsg_node = chatview_node.lookup_node("/privmsg").expect("privmsg type node");
             trace!(target: "app::chat", "send to channel: {channel}");
             {
                 let atom = &mut redraw.make_guard(gfxtag!("sendmsg clear edit"));
@@ -1292,12 +1187,16 @@ pub async fn make(
                 let msg = format!("You are now known as <{nick}>");
                 let id: [u8; 32] = rand::random();
 
+                // Route the local echo through the chatview's receive:
+                // it persists (channel tree + feed mirror) and shows it
+                // in the bound view — insert_line is display-only.
                 let mut data = vec![];
+                channel.encode(&mut data).unwrap();
                 unixtime().encode(&mut data).unwrap();
                 id.encode(&mut data).unwrap();
                 "NOTICE".encode(&mut data).unwrap();
                 msg.encode(&mut data).unwrap();
-                privmsg_node.call_method("insert_line", data).await.unwrap();
+                chatview_node.call_method("receive", data).await.unwrap();
 
                 return
             }
@@ -1389,11 +1288,11 @@ pub async fn make(
     let node = create_button("emoji_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, EMOJIBTN_BOX[0]).unwrap();
+    prop.set_default_f32(0, EMOJIBTN_BOX[0]).unwrap();
     let code = cc.compile("h - EMOJIBTN_BOX_1").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, EMOJIBTN_BOX[2]).unwrap();
-    prop.set_f32(atom, Role::App, 3, EMOJIBTN_BOX[3]).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, EMOJIBTN_BOX[2]).unwrap();
+    prop.set_default_f32(3, EMOJIBTN_BOX[3]).unwrap();
 
     // Chatedit is clicked and requests keyboard. Only show if emoji
     // picker isnt visible: while the panel is open, tapping the edit
@@ -1483,28 +1382,38 @@ pub async fn make(
 
     // Number of visible command rows (0, 1, or 2). Drives the popup height
     // so it shrinks/grows as rows are filtered by the typed text.
-    let mut prop = Property::new("vis_rows", PropertyType::Float32, PropertySubType::Null);
+    let mut prop = Property::new(
+        "vis_rows",
+        PropertyType::Float32,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_defaults_f32(vec![0.]).unwrap();
     cmd_layer_node.add_property(prop).unwrap();
     let cmd_vis_rows_prop = cmd_layer_node.get_property("vis_rows").unwrap();
 
     // Whether the /nick row is visible (1.0/0.0). Positions the /me row
     // below it when both rows are shown.
-    let mut prop = Property::new("nick_row_vis", PropertyType::Float32, PropertySubType::Null);
+    let mut prop = Property::new(
+        "nick_row_vis",
+        PropertyType::Float32,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_defaults_f32(vec![0.]).unwrap();
     cmd_layer_node.add_property(prop).unwrap();
     let nick_row_vis_prop = cmd_layer_node.get_property("nick_row_vis").unwrap();
 
     let prop = cmd_layer_node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 5.).unwrap();
+    prop.set_default_f32(0, 5.).unwrap();
     let code = cc.compile("editz_bg_top_y - CMD_HELP_HEIGHT * vis_rows - CMD_HELP_GAP").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
+    prop.set_default_expr(1, code).unwrap();
     let code = cc.compile("w - 2 * CMD_HELP_GAP").unwrap();
-    prop.set_expr(atom, Role::App, 2, code).unwrap();
+    prop.set_default_expr(2, code).unwrap();
     let code = cc.compile("CMD_HELP_HEIGHT * vis_rows").unwrap();
-    prop.set_expr(atom, Role::App, 3, code).unwrap();
-    prop.add_depend(&editbox_bg_rect_prop, 1, "editz_bg_top_y");
-    prop.add_depend(&cmd_vis_rows_prop, 0, "vis_rows");
+    prop.set_default_expr(3, code).unwrap();
+    prop.add_depend(Role::App, &editbox_bg_rect_prop, 1, "editz_bg_top_y");
+    prop.add_depend(Role::App, &cmd_vis_rows_prop, 0, "vis_rows");
     cmd_layer_node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     cmd_layer_node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
     // The hint popup opens over the chatview (priority 0) — it must be
@@ -1520,11 +1429,11 @@ pub async fn make(
     // The /nick row sits at the top of the popup
     let nick_row_node = create_layer("nick_row");
     let prop = nick_row_node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
     let code = cc.compile("w").unwrap();
-    prop.set_expr(atom, Role::App, 2, code).unwrap();
-    prop.set_f32(atom, Role::App, 3, CMD_HELP_HEIGHT).unwrap();
+    prop.set_default_expr(2, code).unwrap();
+    prop.set_default_f32(3, CMD_HELP_HEIGHT).unwrap();
     nick_row_node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     let nick_row_node =
         nick_row_node.setup(|me| Layer::new(me, renderer.clone(), redraw.clone())).await;
@@ -1536,13 +1445,13 @@ pub async fn make(
     // The /me row sits below the /nick row, or at the top when /nick is filtered out
     let me_row_node = create_layer("me_row");
     let prop = me_row_node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
     let code = cc.compile("CMD_HELP_HEIGHT * nick_row_vis").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
+    prop.set_default_expr(1, code).unwrap();
     let code = cc.compile("w").unwrap();
-    prop.set_expr(atom, Role::App, 2, code).unwrap();
-    prop.set_f32(atom, Role::App, 3, CMD_HELP_HEIGHT).unwrap();
-    prop.add_depend(&nick_row_vis_prop, 0, "nick_row_vis");
+    prop.set_default_expr(2, code).unwrap();
+    prop.set_default_f32(3, CMD_HELP_HEIGHT).unwrap();
+    prop.add_depend(Role::App, &nick_row_vis_prop, 0, "nick_row_vis");
     me_row_node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     let me_row_node =
         me_row_node.setup(|me| Layer::new(me, renderer.clone(), redraw.clone())).await;
@@ -1554,10 +1463,10 @@ pub async fn make(
     let node = create_button("nickcmd_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, CMD_HELP_NICK_CMD_WIDTH).unwrap();
-    prop.set_f32(atom, Role::App, 3, CMD_HELP_HEIGHT).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, CMD_HELP_NICK_CMD_WIDTH).unwrap();
+    prop.set_default_f32(3, CMD_HELP_HEIGHT).unwrap();
 
     let (slot, recvr) = Slot::new("nickcmd_clicked");
     node.register("click", slot).unwrap();
@@ -1581,10 +1490,10 @@ pub async fn make(
     let node = create_button("mecmd_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, CMD_HELP_NICK_CMD_WIDTH).unwrap();
-    prop.set_f32(atom, Role::App, 3, CMD_HELP_HEIGHT).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, CMD_HELP_NICK_CMD_WIDTH).unwrap();
+    prop.set_default_f32(3, CMD_HELP_HEIGHT).unwrap();
 
     let (slot, recvr) = Slot::new("mecmd_clicked");
     node.register("click", slot).unwrap();
@@ -1607,10 +1516,10 @@ pub async fn make(
     // Create the /nick row actionbar bg
     let node = create_vector_art("cmd_hint_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
 
     let mut shape = VectorShape::new();
@@ -1652,19 +1561,16 @@ pub async fn make(
     // Create some text
     let node = create_text("cmd_nick_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CMD_HELP_CMD_LABEL_X_INSET).unwrap();
-    prop.set_f32(atom, Role::App, 1, CMD_HELP_LABEL_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1000.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1000.).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", CMD_HELP_CMD_FONTSIZE).unwrap();
+    prop.set_default_f32(0, CMD_HELP_CMD_LABEL_X_INSET).unwrap();
+    prop.set_default_f32(1, CMD_HELP_LABEL_Y).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 1000.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, CMD_HELP_CMD_FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "/nick").unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
     //node.set_property_str(atom, Role::App, "text", "anon1").unwrap();
     let prop = node.get_property("text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.64).unwrap();
-    prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.83).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0.64, 1., 0.83, 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
 
     let node = node
@@ -1677,19 +1583,16 @@ pub async fn make(
     // Create some text
     let node = create_text("cmd_nick_desc_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CMD_HELP_NICK_DESC_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, CMD_HELP_LABEL_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1000.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1000.).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", FONTSIZE).unwrap();
+    prop.set_default_f32(0, CMD_HELP_NICK_DESC_X).unwrap();
+    prop.set_default_f32(1, CMD_HELP_LABEL_Y).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 1000.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "Change your nickname").unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
     //node.set_property_str(atom, Role::App, "text", "anon1").unwrap();
     let prop = node.get_property("text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.94).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0., 0.94, 1., 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
 
     let node = node
@@ -1702,10 +1605,10 @@ pub async fn make(
     // Create the /me row actionbar bg
     let node = create_vector_art("me_cmd_hint_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
 
     let mut shape = VectorShape::new();
@@ -1747,17 +1650,14 @@ pub async fn make(
     // Create some text
     let node = create_text("cmd_me_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CMD_HELP_CMD_LABEL_X_INSET).unwrap();
-    prop.set_f32(atom, Role::App, 1, CMD_HELP_LABEL_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1000.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1000.).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", CMD_HELP_CMD_FONTSIZE).unwrap();
+    prop.set_default_f32(0, CMD_HELP_CMD_LABEL_X_INSET).unwrap();
+    prop.set_default_f32(1, CMD_HELP_LABEL_Y).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 1000.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, CMD_HELP_CMD_FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "/me").unwrap();
     let prop = node.get_property("text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.64).unwrap();
-    prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.83).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0.64, 1., 0.83, 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
 
     let node = node
@@ -1770,17 +1670,14 @@ pub async fn make(
     // Create some text
     let node = create_text("cmd_me_desc_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CMD_HELP_NICK_DESC_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, CMD_HELP_LABEL_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1000.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1000.).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", FONTSIZE).unwrap();
+    prop.set_default_f32(0, CMD_HELP_NICK_DESC_X).unwrap();
+    prop.set_default_f32(1, CMD_HELP_LABEL_Y).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 1000.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "Send an action message").unwrap();
     let prop = node.get_property("text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.94).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    prop.set_default_f32_multi(&[0., 0.94, 1., 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
 
     let node = node
@@ -1823,11 +1720,11 @@ pub async fn make(
             // the /me row sits below the /nick row when both are shown.
             let vis_rows = (nick_vis as u8 + me_vis as u8) as f32;
             if cmd_vis_rows_prop.get_f32(0).unwrap() != vis_rows {
-                cmd_vis_rows_prop.set_f32(atom, Role::App, 0, vis_rows).unwrap();
+                cmd_vis_rows_prop.set_default_f32(0, vis_rows).unwrap();
             }
             let nick_vis_f = nick_vis as u8 as f32;
             if nick_row_vis_prop.get_f32(0).unwrap() != nick_vis_f {
-                nick_row_vis_prop.set_f32(atom, Role::App, 0, nick_vis_f).unwrap();
+                nick_row_vis_prop.set_default_f32(0, nick_vis_f).unwrap();
             }
         }
     });
@@ -1839,34 +1736,67 @@ pub async fn make(
 // Just for testing
 #[allow(dead_code)]
 pub(super) fn populate_tree(tree: &Tree) {
+    populate_tree_chan(tree, |_| "#dev".to_string());
+}
+
+/// Feed fixture: the same chat.txt lines re-stamped across a few
+/// channels (stable per nick, so conversations stay coherent) — the
+/// `*` view gets labeled, mixed-room content to test with.
+#[allow(dead_code)]
+pub(super) fn populate_feed_tree(tree: &Tree) {
+    const FEED_CHANNELS: [&str; 3] = ["#dev", "#ramen", "#darkfi"];
+    populate_tree_chan(tree, |nick| {
+        let hash = nick.bytes().map(|b| b as usize).sum::<usize>();
+        FEED_CHANNELS[hash % FEED_CHANNELS.len()].to_string()
+    });
+}
+
+fn populate_tree_chan(tree: &Tree, channel_of: impl Fn(&str) -> String) {
     use crate::ui::chatview::{codec, MessageId, MsgType};
-    use chrono::{NaiveDate, NaiveDateTime};
+    use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 
     let chat_txt = include_str!("../../../data/chat.txt");
+    let mut day_offset = 0i64;
+    let mut prev_secs = 0u32;
     for (idx, line) in chat_txt.lines().enumerate() {
-        let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        assert_eq!(parts.len(), 3);
-        let time_parts: Vec<&str> = parts[0].splitn(2, ':').collect();
-        let (hour, min) = (time_parts[0], time_parts[1]);
+        // A few lines use a tab instead of a space after the nick.
+        let (time, rest) = line.split_once(' ').expect("malformed line");
+        let (nick, text) =
+            rest.split_once(' ').or_else(|| rest.split_once('\t')).expect("malformed line");
+        let time_parts: Vec<&str> = time.splitn(3, ':').collect();
+        assert_eq!(time_parts.len(), 3);
+        let (hour, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
         let hour = hour.parse::<u32>().unwrap();
         let min = min.parse::<u32>().unwrap();
-        let dt: NaiveDateTime =
-            NaiveDate::from_ymd_opt(2024, 8, 6).unwrap().and_hms_opt(hour, min, 0).unwrap();
-        let timest = dt.and_utc().timestamp_millis() as u64;
+        let sec = sec.parse::<u32>().unwrap();
+        let secs = hour * 3600 + min * 60 + sec;
+        if secs < prev_secs {
+            day_offset += 1;
+        }
+        prev_secs = secs;
+        let date =
+            NaiveDate::from_ymd_opt(2024, 8, 6).unwrap() + chrono::Duration::days(day_offset);
+        let dt: NaiveDateTime = date.and_hms_opt(hour, min, sec).unwrap();
+        let timest = Local.from_local_datetime(&dt).unwrap().timestamp_millis() as u64;
 
-        let nick = parts[1].to_string();
-        let text = parts[2].to_string();
+        let nick = nick.to_string();
+        let text = text.to_string();
+        let channel = channel_of(&nick);
 
         // Unique id per line: the minute timestamp alone can repeat.
         let mut id_bytes = [0u8; 32];
         id_bytes[..8].copy_from_slice(&(idx as u64).to_be_bytes());
         let id = MessageId(id_bytes);
 
-        let payload = codec::encode_privmsg_payload(&nick, &text, true);
+        let payload = codec::encode_privmsg_payload(&nick, &text, true, &channel);
         let val = codec::encode_value(MsgType::PrivMsg, &payload);
         let key = codec::encode_key(timest, &id);
         tree.insert(&key, &val).unwrap();
     }
     // O(n)
-    debug!(target: "app::schema", "populated db with {} lines", tree.len().unwrap());
+    debug!(
+        target: "app::schema",
+        "populated db with {} lines, day_offset={day_offset}",
+        tree.len().unwrap()
+    );
 }

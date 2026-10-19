@@ -46,7 +46,7 @@ pub struct ScenePath(VecDeque<String>);
 impl<S: Into<String>> From<S> for ScenePath {
     fn from(path: S) -> Self {
         let path: String = path.into();
-        (&path).parse().expect("invalid ScenePath &str")
+        (&path).parse().expect(&format!("invalid ScenePath {path}"))
     }
 }
 
@@ -124,6 +124,8 @@ pub enum SceneNodeType {
     PrivMsgNode = 26,
     DateMsgNode = 27,
     FileMsgNode = 28,
+    Slider = 29,
+    Dropdown = 30,
     PluginRoot = 100,
     Plugin = 101,
 }
@@ -619,6 +621,8 @@ pub enum Pimpl {
     PrivMsgNode(ui::chatview::msg::PrivMsgNodePtr),
     DateMsgNode(ui::chatview::msg::DateMsgNodePtr),
     FileMsgNode(ui::chatview::msg::FileMsgNodePtr),
+    Slider(ui::SliderPtr),
+    Dropdown(ui::DropdownPtr),
     #[cfg(feature = "enable-plugin-darkirc")]
     DarkIrc(plugin::DarkIrcPtr),
     #[cfg(feature = "enable-plugin-fud")]

@@ -16,12 +16,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+use bs58;
 use darkfi_serial::{deserialize, Encodable};
+use futures::FutureExt;
 use kvdb_overlay::Database as KvDb;
 use std::io::Write;
 use ui_consts::*;
 
-use super::{read_joined_channels, write_joined_channels, ColorScheme, COLOR_SCHEME};
+use super::{read_joined_channels, write_joined_channels};
 use crate::{
     app::{
         node::{create_button, create_layer, create_menu, create_text, create_vector_art},
@@ -30,10 +32,14 @@ use crate::{
     db::AppDbPtr,
     expr,
     gfx::gfxtag,
-    mesh::COLOR_CYAN,
+    mesh::{
+        COLOR_BLUE, COLOR_CYAN, COLOR_INACTIVE, COLOR_WALLET_SQUARE_BORDER,
+        COLOR_WALLET_SQUARE_FILL,
+    },
     prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, Role},
     scene::{SceneNodePtr, Slot},
     sfx, shape,
+    theme::wire_color,
     ui::{
         emoji_picker::EmojiMeshesPtr, Button, Layer, Menu, ShapeVertex, Text, VectorArt,
         VectorShape,
@@ -44,35 +50,43 @@ use crate::{
 #[cfg(any(target_os = "android", feature = "emulate-android"))]
 mod android_ui_consts {
     pub const CHANNEL_LABEL_X: f32 = 40.;
-    pub const CHANNEL_LABEL_Y: f32 = 35.;
     pub const CHANNEL_HEADER_HEIGHT: f32 = 140.;
     pub const CHANNEL_ITEM_HEIGHT: f32 = 115.;
     pub const CHANNEL_LABEL_FONTSIZE: f32 = 46.;
+    pub const BACKARROW_BG_W: f32 = 140.;
+    pub const CHANNELS_TITLE_X: f32 = BACKARROW_BG_W + CHANNEL_LABEL_X;
+    pub const CHANNELS_TITLE_Y: f32 = 35.;
     pub const MENU_SEP_SIZE: f32 = 3.;
     pub const MENU_HANDLE_PAD: f32 = 200.;
     pub const MENU_FADE: f32 = 1200.;
     pub const VERBLOCK_SCALE: f32 = 150.;
     pub const VERBLOCK_X: f32 = 140.;
     pub const VERBLOCK_Y: f32 = 130.;
-    pub const NETLOGO_SCALE: f32 = 16.;
     // Button constants
     pub const MENU_BTN_W_L: f32 = 250.;
-    pub const MENU_BTN_W_R: f32 = 200.;
     pub const MENU_BTN_H: f32 = 180.;
     pub const EDIT_BTN_OUTLINE_T: f32 = 2.;
     pub const BTN_TEXT_FONTSIZE: f32 = 50.;
     pub const BTN_TEXT_Y: f32 = 30.;
     pub const LABEL_LINESPACE: f32 = 60.;
-    pub const MENU_ICON_SCALE: f32 = 220.;
+    pub const WALLET_SQUARE: f32 = 240.;
+    pub const WALLET_BORDER_T: f32 = 1.;
+    pub const WALLET_ICON_SCALE: f32 = 17.25;
+    pub const MENU_ICON_SCALE: f32 = 220.5;
+    pub const SETTINGS_ICON_SCALE: f32 = 55.;
+
+    pub const DARKFI_LOGO_SCALE: f32 = 40.;
+    // Button-column metrics
+    pub const WRITE_BTN_H: f32 = 204.;
+    pub const WRITE_ICON_X: f32 = 219.;
+    pub const WRITE_ICON_Y: f32 = 140.;
+    pub const SETTINGS_BTN_Y: f32 = 244.;
+    pub const SETTINGS_ICON_Y: f32 = 364.;
+    pub const BTN_COL_H: f32 = 764.;
 }
 
-#[cfg(target_os = "android")]
-mod ui_consts {
-    pub use super::android_ui_consts::*;
-}
-
-#[cfg(feature = "emulate-android")]
-mod ui_consts {
+#[cfg(any(target_os = "android", feature = "emulate-android"))]
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
@@ -80,12 +94,14 @@ mod ui_consts {
     any(target_os = "linux", target_os = "macos", target_os = "windows"),
     not(feature = "emulate-android")
 ))]
-mod ui_consts {
+pub mod ui_consts {
     pub const CHANNEL_LABEL_X: f32 = 20.;
-    pub const CHANNEL_LABEL_Y: f32 = 14.;
     pub const CHANNEL_HEADER_HEIGHT: f32 = 60.;
     pub const CHANNEL_ITEM_HEIGHT: f32 = 40.;
     pub const CHANNEL_LABEL_FONTSIZE: f32 = 18.;
+    pub const BACKARROW_BG_W: f32 = 80.;
+    pub const CHANNELS_TITLE_X: f32 = BACKARROW_BG_W + CHANNEL_LABEL_X;
+    pub const CHANNELS_TITLE_Y: f32 = 18.;
     pub const MENU_SEP_SIZE: f32 = 1.;
     pub const MENU_HANDLE_PAD: f32 = 100.;
     pub const MENU_FADE: f32 = 600.;
@@ -93,22 +109,33 @@ mod ui_consts {
     pub const VERBLOCK_X: f32 = 80.;
     pub const OUTLINE_MINT: [f32; 4] = [0.467, 1.0, 0.745, 1.0];
     pub const VERBLOCK_Y: f32 = 75.;
-    pub const NETLOGO_SCALE: f32 = 7.;
     // Button constants
     pub const MENU_BTN_W_L: f32 = 110.;
-    pub const MENU_BTN_W_R: f32 = 85.;
     pub const MENU_BTN_H: f32 = 100.;
     pub const EDIT_BTN_OUTLINE_T: f32 = 1.;
     pub const BTN_TEXT_FONTSIZE: f32 = 20.;
     pub const BTN_TEXT_Y: f32 = 14.;
     pub const LABEL_LINESPACE: f32 = 140.;
-    pub const MENU_ICON_SCALE: f32 = 100.;
+    pub const WALLET_SQUARE: f32 = 92.5;
+    pub const WALLET_BORDER_T: f32 = 0.375;
+    pub const WALLET_ICON_SCALE: f32 = 6.25;
+    pub const MENU_ICON_SCALE: f32 = 80.;
+    pub const SETTINGS_ICON_SCALE: f32 = 28.;
+
+    pub const DARKFI_LOGO_SCALE: f32 = 20.;
+    // Button-column metrics
+    pub const WRITE_BTN_H: f32 = 74.;
+    pub const WRITE_ICON_X: f32 = 83.;
+    pub const WRITE_ICON_Y: f32 = 70.;
+    pub const SETTINGS_BTN_Y: f32 = 94.;
+    pub const SETTINGS_ICON_Y: f32 = 141.;
+    pub const BTN_COL_H: f32 = 299.;
 }
 
 pub mod channel;
 pub mod contact;
 mod edit_buttons;
-mod edit_switch;
+pub mod edit_switch;
 
 pub async fn make(
     app: &App,
@@ -119,9 +146,9 @@ pub async fn make(
     emoji_meshes: EmojiMeshesPtr,
 ) {
     let window_scale = PropertyFloat32::wrap(
-        &app.sg_root.lookup_node("/window").unwrap(),
+        &app.sg_root.lookup_node("/setting").unwrap(),
         Role::Internal,
-        "scale",
+        "win.scale",
         0,
     )
     .unwrap();
@@ -131,10 +158,10 @@ pub async fn make(
     // Create contact screen
     let contact_layer = create_layer("contact_screen_layer");
     let prop = contact_layer.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     contact_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     contact_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let contact_layer = contact_layer
@@ -147,10 +174,10 @@ pub async fn make(
     // Create channel screen
     let channel_layer = create_layer("channel_screen_layer");
     let prop = channel_layer.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     channel_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     channel_layer.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     let channel_layer = channel_layer
@@ -166,20 +193,20 @@ pub async fn make(
     cc.add_const_f32("CHANNEL_HEADER_HEIGHT", CHANNEL_HEADER_HEIGHT);
     cc.add_const_f32("CHANNEL_ITEM_HEIGHT", CHANNEL_ITEM_HEIGHT);
     cc.add_const_f32("CHANNEL_LABEL_X", CHANNEL_LABEL_X);
-    cc.add_const_f32("MENU_BTN_W_L", MENU_BTN_W_L);
-    cc.add_const_f32("MENU_BTN_W_R", MENU_BTN_W_R);
     cc.add_const_f32("MENU_BTN_H", MENU_BTN_H);
-    cc.add_const_f32("MENU_ICON_SCALE", MENU_ICON_SCALE);
+    cc.add_const_f32("WALLET_SQUARE", WALLET_SQUARE);
+    cc.add_const_f32("BTN_COL_H", BTN_COL_H);
+    cc.add_const_f32("WRITE_ICON_X", WRITE_ICON_X);
 
     let atom = &mut PropertyAtomicGuard::none();
 
     // Main view
     let layer_node = create_layer("menu_layer");
     let prop = layer_node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     layer_node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     layer_node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
     let layer_node = layer_node
@@ -217,77 +244,21 @@ pub async fn make(
     )
     .await;
 
-    // Channels label bg
-    let node = create_vector_art("channels_label_bg");
-    let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_f32(atom, Role::App, 3, CHANNEL_HEADER_HEIGHT).unwrap();
-    node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
-
-    let mut shape = VectorShape::new();
-    let (bg_color, sep_color) = match COLOR_SCHEME {
-        ColorScheme::DarkMode => ([0., 0., 0., 1.], [0.41, 0.6, 0.65, 1.]),
-        ColorScheme::PaperLight => ([1., 1., 1., 1.], [0., 0.6, 0.65, 1.]),
-    };
-    shape.add_filled_box(
-        expr::const_f32(0.),
-        expr::const_f32(0.),
-        expr::load_var("w"),
-        expr::load_var("h"),
-        bg_color,
-    );
-    shape.add_filled_box(
-        expr::const_f32(0.),
-        expr::load_var("h"),
-        expr::load_var("w"),
-        cc.compile("h + 0.5").unwrap(),
-        sep_color,
-    );
-    let color1 = [0., 0.17, 0.18, 0.5];
-    let color2 = [0., 0.88, 1., 0.];
-    shape.add_smooth_vertical_gradient(
-        expr::const_f32(0.),
-        expr::const_f32(0.),
-        expr::load_var("w"),
-        cc.compile("h / 2").unwrap(),
-        color1,
-        color2,
-        8,
-        0.2,
-    );
-
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
-    let node =
-        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
-    layer_node.link(node);
-
     // Create some text
     let node = create_text("channels_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CHANNEL_LABEL_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, CHANNEL_LABEL_Y).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1000.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 200.).unwrap();
+    prop.set_default_f32(0, CHANNELS_TITLE_X).unwrap();
+    prop.set_default_f32(1, CHANNELS_TITLE_Y).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 200.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", CHANNEL_LABEL_FONTSIZE).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, CHANNEL_LABEL_FONTSIZE).unwrap();
     node.set_property_bool(atom, Role::App, "use_i18n", true).unwrap();
     node.set_property_str(atom, Role::App, "text", "channels-label").unwrap();
     //node.set_property_str(atom, Role::App, "text", "anon1").unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
     let prop = node.get_property("text_color").unwrap();
-    if COLOR_SCHEME == ColorScheme::DarkMode {
-        prop.set_f32(atom, Role::App, 0, 0.65).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.87).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.83).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    } else if COLOR_SCHEME == ColorScheme::PaperLight {
-        prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 2, 0.).unwrap();
-        prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-    }
+    prop.set_default_f32_multi(&[0.65, 0.87, 0.83, 1.]).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
 
     let node = node
@@ -303,15 +274,66 @@ pub async fn make(
         .await;
     layer_node.link(node);
 
-    // Main button layer
+    // Main menu button bg (blue box placeholder). Same spot the back
+    // button takes on the chat subscreens. It lives on the menu layer,
+    // so it is only shown on the main chat screen.
+    let node = create_vector_art("main_menu_btn_bg");
+    let prop = node.get_property("rect").unwrap();
+    prop.set_default_f32(0, BACKARROW_BG_W / 2.).unwrap();
+    prop.set_default_f32(1, CHANNEL_HEADER_HEIGHT / 2.).unwrap();
+    prop.set_default_f32(2, BACKARROW_BG_W).unwrap();
+    prop.set_default_f32(3, CHANNEL_HEADER_HEIGHT).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+    node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
+    let shape = shape::create_darkfi_logo([1., 1., 1., 1.]).scaled(DARKFI_LOGO_SCALE);
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    layer_node.link(node);
+
+    // Main menu button
+    let node = create_button("main_menu_btn");
+    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 10).unwrap();
+    node.set_property_u32(atom, Role::App, "priority", 10).unwrap();
+    let prop = node.get_property("rect").unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, BACKARROW_BG_W).unwrap();
+    prop.set_default_f32(3, CHANNEL_HEADER_HEIGHT).unwrap();
+
+    let sg_root = app.sg_root.clone();
+    let redraw = app.redraw_trigger.clone();
+    let (slot, recvr) = Slot::new("main_menu_clicked");
+    node.register("click", slot).unwrap();
+    let listen_click = app.ex.spawn(async move {
+        while recvr.recv().await.is_ok() {
+            info!(target: "app::menu", "clicked main menu");
+            let main_menu_layer = sg_root.lookup_node("/window/content/main_menu_layer").unwrap();
+            let main_menu_is_visible =
+                PropertyBool::wrap(&main_menu_layer, Role::App, "is_visible", 0).unwrap();
+            let atom = &mut redraw.make_guard(gfxtag!("main menu toggle"));
+            main_menu_is_visible.set(atom, !main_menu_is_visible.get());
+        }
+    });
+    app.tasks.lock().push(listen_click);
+
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    layer_node.link(node);
+
+    // Main button layer: the right-edge button column. Tall enough to
+    // hold the write button on top, the settings button in the middle
+    // and the wallet square at the bottom. Children are scissored to
+    // this rect, so it must cover everything it contains.
     let node = create_layer("mainbtn_layer");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, CHANNEL_LABEL_X).unwrap();
-    let code = cc.compile("h - MENU_BTN_H - CHANNEL_LABEL_X").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
+    prop.set_default_f32(0, CHANNEL_LABEL_X).unwrap();
+    let code = cc.compile("h - BTN_COL_H - CHANNEL_LABEL_X").unwrap();
+    prop.set_default_expr(1, code).unwrap();
     let code = cc.compile("w - 2 * CHANNEL_LABEL_X").unwrap();
-    prop.set_expr(atom, Role::App, 2, code).unwrap();
-    prop.set_f32(atom, Role::App, 3, MENU_BTN_H).unwrap();
+    prop.set_default_expr(2, code).unwrap();
+    prop.set_default_f32(3, BTN_COL_H).unwrap();
     node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
@@ -324,14 +346,14 @@ pub async fn make(
     let node = create_vector_art("version_block");
     let prop = node.get_property("rect").unwrap();
     let code = cc.compile("CHANNEL_LABEL_X + VERBLOCK_X").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
+    prop.set_default_expr(0, code).unwrap();
     let code = cc.compile("h - MENU_BTN_H - CHANNEL_LABEL_X + VERBLOCK_Y").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
     node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
-    node.set_property_f32(atom, Role::App, "scale", VERBLOCK_SCALE).unwrap();
+    node.get_property("scale").unwrap().set_default_f32(0, VERBLOCK_SCALE).unwrap();
     let shape = shape::create_version_block([1., 0., 0.25, 1.]);
 
     node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
@@ -339,15 +361,15 @@ pub async fn make(
         node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     layer_node.link(node);
 
-    // Write / Menu button
+    // Write / Menu button (top of the button column, above the settings button)
     let node = create_button("write_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - MENU_BTN_W_R").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, MENU_BTN_W_R).unwrap();
-    prop.set_expr(atom, Role::App, 3, expr::load_var("h")).unwrap();
+    let code = cc.compile("w - WALLET_SQUARE").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_f32(2, WALLET_SQUARE).unwrap();
+    prop.set_default_f32(3, WRITE_BTN_H).unwrap();
     //Uncomment this to see the button outline
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
     //node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
@@ -365,7 +387,7 @@ pub async fn make(
             menulayer_is_visible1.set(atom, false);
         }
     });
-    app.tasks.lock().unwrap().push(listen_click);
+    app.tasks.lock().push(listen_click);
 
     let node =
         node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
@@ -373,14 +395,15 @@ pub async fn make(
 
     let node = create_vector_art("write_icon");
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - MENU_BTN_W_R / 2 - MENU_ICON_SCALE * 0.45").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
-    prop.set_f32(atom, Role::App, 1, MENU_BTN_H / 2. + MENU_ICON_SCALE * 0.36).unwrap();
-    prop.set_f32(atom, Role::App, 2, MENU_ICON_SCALE).unwrap();
-    prop.set_f32(atom, Role::App, 3, MENU_ICON_SCALE).unwrap();
+    let code = cc.compile("w - WRITE_ICON_X").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, WRITE_ICON_Y).unwrap();
+    prop.set_default_f32(2, MENU_ICON_SCALE).unwrap();
+    prop.set_default_f32(3, MENU_ICON_SCALE).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
     let shape = shape::create_menu_icon(COLOR_CYAN).scaled(MENU_ICON_SCALE);
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let node =
         node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     mainlayer_node.link(node);
@@ -392,39 +415,32 @@ pub async fn make(
     // Menu
     let node = create_menu("main_menu");
     let prop = node.get_property("rect").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, CHANNEL_HEADER_HEIGHT).unwrap();
-    prop.set_expr(atom, Role::App, 2, expr::load_var("w")).unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, CHANNEL_HEADER_HEIGHT).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
     let code = cc.compile("h - CHANNEL_HEADER_HEIGHT").unwrap();
-    prop.set_expr(atom, Role::App, 3, code).unwrap();
+    prop.set_default_expr(3, code).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 0).unwrap();
-    node.set_property_f32(atom, Role::App, "padding", CHANNEL_ITEM_HEIGHT).unwrap();
+    node.get_property("padding").unwrap().set_default_f32(0, CHANNEL_ITEM_HEIGHT).unwrap();
 
-    let prop = node.get_property("bg_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 0.5).unwrap();
-    node.set_property_f32(atom, Role::App, "font_size", CHANNEL_LABEL_FONTSIZE).unwrap();
-    node.set_property_f32(atom, Role::App, "sep_size", MENU_SEP_SIZE).unwrap();
-
-    let prop = node.get_property("text_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 1, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
-
+    // Class wiring onto the shared /theme tokens: the menu tracks the
+    // active palette from here on (minimal palette while unloaded).
+    let theme = app.sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "bg_color", &theme, "menu.bg_color").unwrap();
+    wire_color(&node, "text_color", &theme, "text_color").unwrap();
+    // The separator keeps its exact shipped grey default (not a token).
     let prop = node.get_property("sep_color").unwrap();
-    prop.set_f32(atom, Role::App, 0, 0.4).unwrap();
-    prop.set_f32(atom, Role::App, 1, 0.4).unwrap();
-    prop.set_f32(atom, Role::App, 2, 0.4).unwrap();
-    prop.set_f32(atom, Role::App, 3, 0.4).unwrap();
+    prop.set_default_f32_multi(&[0.4, 0.4, 0.4, 0.4]).unwrap();
+    wire_color(&node, "role1_color", &theme, "menu.role1_color").unwrap();
+    wire_color(&node, "role2_color", &theme, "menu.role2_color").unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, CHANNEL_LABEL_FONTSIZE).unwrap();
+    node.get_property("sep_size").unwrap().set_default_f32(0, MENU_SEP_SIZE).unwrap();
 
     let prop = node.get_property("padding").unwrap();
-    prop.set_f32(atom, Role::App, 0, CHANNEL_LABEL_X).unwrap();
-    prop.set_f32(atom, Role::App, 1, CHANNEL_ITEM_HEIGHT / 2.).unwrap();
-    node.set_property_f32(atom, Role::App, "handle_padding", MENU_HANDLE_PAD).unwrap();
+    prop.set_default_f32(0, CHANNEL_LABEL_X).unwrap();
+    prop.set_default_f32(1, CHANNEL_ITEM_HEIGHT / 2.).unwrap();
+    node.get_property("handle_padding").unwrap().set_default_f32(0, MENU_HANDLE_PAD).unwrap();
     node.set_property_f32(atom, Role::App, "fade_zone", MENU_FADE).unwrap();
 
     let prop = node.get_property("items").unwrap();
@@ -460,7 +476,7 @@ pub async fn make(
             }
         }
     });
-    app.tasks.lock().unwrap().push(listen_click);
+    app.tasks.lock().push(listen_click);
 
     let menu_node = node
         .setup(|me| {
@@ -513,7 +529,7 @@ pub async fn make(
             // }
         }
     });
-    app.tasks.lock().unwrap().push(edit_done_listen);
+    app.tasks.lock().push(edit_done_listen);
 
     // Connect cancel/done buttons and edit_active signal
     btns.connect_edit_handlers(app, &menu_node, Some(mainlayer_is_visible.clone()));
@@ -522,52 +538,74 @@ pub async fn make(
 pub async fn setup_wallet_button(app: &App, chat_layer: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     let atom = &mut PropertyAtomicGuard::none();
     let mut cc = expr::Compiler::new();
-    cc.add_const_f32("MENU_BTN_W_R", MENU_BTN_W_R);
-    cc.add_const_f32("MENU_BTN_H", MENU_BTN_H);
-    cc.add_const_f32("CHANNEL_LABEL_X", CHANNEL_LABEL_X);
-
-    let _window_scale = PropertyFloat32::wrap(
-        &app.sg_root.lookup_node("/window").unwrap(),
-        Role::Internal,
-        "scale",
-        0,
-    )
-    .unwrap();
+    cc.add_const_f32("WALLET_SQUARE", WALLET_SQUARE);
 
     let chat_is_visible = PropertyBool::wrap(&chat_layer, Role::App, "is_visible", 0).unwrap();
-    let menu_layer = chat_layer.lookup_node("/menu_layer").unwrap();
+    // Bottom row of the menu layer: hides while the edit bar is shown.
+    let mainbtn_layer = chat_layer.lookup_node("/menu_layer/mainbtn_layer").unwrap();
+
+    let node = create_vector_art("wallet_square");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w - WALLET_SQUARE").unwrap();
+    prop.set_expr(atom, Role::App, 0, code).unwrap();
+    let code = cc.compile("h - WALLET_SQUARE").unwrap();
+    prop.set_expr(atom, Role::App, 1, code).unwrap();
+    prop.set_f32(atom, Role::App, 2, WALLET_SQUARE).unwrap();
+    prop.set_f32(atom, Role::App, 3, WALLET_SQUARE).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
+    let mut shape = VectorShape::new();
+    shape.add_filled_box(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::const_f32(WALLET_SQUARE),
+        expr::const_f32(WALLET_SQUARE),
+        COLOR_WALLET_SQUARE_FILL,
+    );
+    shape.add_outline(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::const_f32(WALLET_SQUARE),
+        expr::const_f32(WALLET_SQUARE),
+        WALLET_BORDER_T,
+        COLOR_WALLET_SQUARE_BORDER,
+    );
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    mainbtn_layer.link(node);
 
     // Wallet status icon (blockchain netlogo, all cyan = fully connected)
-    // Positioned at center of wallet button area, above write_btn
+    // Centered in the wallet square at the bottom of the button column
     let node = create_vector_art("wallet_icon");
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - MENU_BTN_W_R / 2 - CHANNEL_LABEL_X").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
-    let code = cc.compile("h - MENU_BTN_H - MENU_BTN_W_R / 2 - CHANNEL_LABEL_X").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, 1.).unwrap();
-    prop.set_f32(atom, Role::App, 3, 1.).unwrap();
+    let code = cc.compile("w - WALLET_SQUARE / 2").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    let code = cc.compile("h - WALLET_SQUARE / 2").unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, 1.).unwrap();
+    prop.set_default_f32(3, 1.).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
-    node.set_property_f32(atom, Role::App, "scale", NETLOGO_SCALE).unwrap();
+    node.get_property("scale").unwrap().set_default_f32(0, WALLET_ICON_SCALE).unwrap();
     let mut shape = shape::create_blockchain_netlogo1(COLOR_CYAN);
     shape.join(shape::create_blockchain_netlogo2(COLOR_CYAN));
     shape.join(shape::create_blockchain_netlogo3(COLOR_CYAN));
     shape.join(shape::create_blockchain_netlogo4(COLOR_CYAN));
-    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
     let node =
         node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
-    menu_layer.link(node);
+    mainbtn_layer.link(node);
 
-    // Wallet button (above write_btn, square: w = h = MENU_BTN_W_R)
+    // Wallet button
     let node = create_button("wallet_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - MENU_BTN_W_R - CHANNEL_LABEL_X").unwrap();
-    prop.set_expr(atom, Role::App, 0, code).unwrap();
-    let code = cc.compile("h - MENU_BTN_H - MENU_BTN_W_R - CHANNEL_LABEL_X").unwrap();
-    prop.set_expr(atom, Role::App, 1, code).unwrap();
-    prop.set_f32(atom, Role::App, 2, MENU_BTN_W_R).unwrap();
-    prop.set_f32(atom, Role::App, 3, MENU_BTN_W_R).unwrap();
+    let code = cc.compile("w - WALLET_SQUARE").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    let code = cc.compile("h - WALLET_SQUARE").unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, WALLET_SQUARE).unwrap();
+    prop.set_default_f32(3, WALLET_SQUARE).unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
 
     let (slot, recvr) = Slot::new("wallet_clicked");
@@ -588,11 +626,114 @@ pub async fn setup_wallet_button(app: &App, chat_layer: SceneNodePtr, i18n_fish:
             chat_is_visible.set(atom, false);
         }
     });
-    app.tasks.lock().unwrap().push(listen_click);
+    app.tasks.lock().push(listen_click);
 
     let renderer = app.renderer.clone();
     let redraw = app.redraw_trigger.clone();
 
     let node = node.setup(|me| Button::new(me, renderer, redraw)).await;
-    menu_layer.link(node);
+    mainbtn_layer.link(node);
+}
+
+pub async fn setup_settings_button(app: &App, chat_layer: SceneNodePtr) {
+    let atom = &mut PropertyAtomicGuard::none();
+    let mut cc = expr::Compiler::new();
+    cc.add_const_f32("WALLET_SQUARE", WALLET_SQUARE);
+
+    let mainlayer_node = chat_layer.lookup_node("/menu_layer/mainbtn_layer").unwrap();
+
+    // Settings icon (middle slot of the button column, between the
+    // write button above and the wallet square below)
+    let node = create_vector_art("settings_icon");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w - WALLET_SQUARE / 2").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, SETTINGS_ICON_Y).unwrap();
+    prop.set_default_f32(2, SETTINGS_ICON_SCALE).unwrap();
+    prop.set_default_f32(3, SETTINGS_ICON_SCALE).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+    let shape = shape::create_settings(COLOR_CYAN).scaled(SETTINGS_ICON_SCALE);
+    let prop = node.get_property("shape").unwrap();
+    prop.set_default_shape(0, shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    mainlayer_node.link(node);
+
+    // Settings button
+    let node = create_button("settings_btn");
+    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w - WALLET_SQUARE").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, SETTINGS_BTN_Y).unwrap();
+    prop.set_default_f32(2, WALLET_SQUARE).unwrap();
+    prop.set_default_f32(3, WALLET_SQUARE).unwrap();
+    //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
+
+    let (slot, recvr) = Slot::new("settings_clicked");
+    node.register("click", slot).unwrap();
+    let sg_root = app.sg_root.clone();
+    let redraw = app.redraw_trigger.clone();
+    let listen_click = app.ex.spawn(async move {
+        while let Ok(_) = recvr.recv().await {
+            let atom = &mut redraw.make_guard(gfxtag!("settings_click"));
+            let settings_node = sg_root.lookup_node("/window/content/settings_layer").unwrap();
+            settings_node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
+            let chat_node = sg_root.lookup_node("/window/content/chat").unwrap();
+            chat_node.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
+        }
+    });
+    app.tasks.lock().push(listen_click);
+
+    let renderer = app.renderer.clone();
+    let redraw = app.redraw_trigger.clone();
+
+    let node = node.setup(|me| Button::new(me, renderer, redraw)).await;
+    mainlayer_node.link(node);
+}
+
+fn valid_key(s: &str) -> bool {
+    bs58::decode(s).into_vec().is_ok_and(|bytes| bytes.len() == 32)
+}
+
+/// Grey an add button out until its name and key are valid
+pub fn setup_add_button_validity(
+    app: &App,
+    nickedit_node: &SceneNodePtr,
+    secedit_node: &SceneNodePtr,
+    add_label: SceneNodePtr,
+    btns_bg: SceneNodePtr,
+    btns_bg_grey: SceneNodePtr,
+    valid_tag: &'static str,
+) {
+    let name_text = nickedit_node.get_property("text").unwrap();
+    let key_text = secedit_node.get_property("text").unwrap();
+    let name_sub = name_text.subscribe_modify();
+    let key_sub = key_text.subscribe_modify();
+    let redraw = app.redraw_trigger.clone();
+    let nickedit_handle = nickedit_node.clone();
+    let keyedit_handle = secedit_node.clone();
+    let listen_valid = app.ex.spawn(async move {
+        loop {
+            futures::select! {
+                _ = name_sub.receive().fuse() => {},
+                _ = key_sub.receive().fuse() => {},
+            }
+
+            let name = nickedit_handle.get_property_str("text").unwrap();
+            let key = keyedit_handle.get_property_str("text").unwrap();
+            let valid = !name.is_empty() && valid_key(&key);
+
+            let atom = &mut redraw.make_guard(gfxtag!(valid_tag));
+            btns_bg.set_property_bool(atom, Role::App, "is_visible", valid).unwrap();
+            btns_bg_grey.set_property_bool(atom, Role::App, "is_visible", !valid).unwrap();
+            let color = if valid { COLOR_CYAN } else { COLOR_INACTIVE };
+            let prop = add_label.get_property("text_color").unwrap();
+            prop.set_f32(atom, Role::App, 0, color[0]).unwrap();
+            prop.set_f32(atom, Role::App, 1, color[1]).unwrap();
+            prop.set_f32(atom, Role::App, 2, color[2]).unwrap();
+            prop.set_f32(atom, Role::App, 3, color[3]).unwrap();
+        }
+    });
+    app.tasks.lock().push(listen_valid);
 }

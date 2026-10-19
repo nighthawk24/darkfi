@@ -39,12 +39,35 @@ mod android_ui_consts {
     pub const TOKEN_NAME_OFFSET: f32 = 200.;
     pub const PADDING_X: f32 = 40.;
     pub const PADDING_Y: f32 = 30.;
+    /// Margin between the feed layers and the screen edges.
+    pub const FEED_LAYER_MARGIN: f32 = 30.;
+    /// Inset padding of the feed view inside its layer (sides and
+    /// bottom; the top is flush under the header).
+    pub const FEED_LAYER_PADDING: f32 = 20.;
+    /// Header band inside the feed layer (the feed chatview starts
+    /// below it).
+    pub const FEED_HEADER_HEIGHT: f32 = 100.;
+    /// Horizontal padding of the header's contents.
+    pub const FEED_HEADER_PAD: f32 = 30.;
+    /// "CHAT" header label font size.
+    pub const FEED_HEADER_FONTSIZE: f32 = 40.;
+    /// The header's down-arrow glyph scale.
+    pub const FEED_ARROW_SCALE: f32 = 60.;
+    pub const FEED_ARROW_Y: f32 = 44.;
+    // Feed chatview styling (mirrors the chat screen's values).
+    pub const FEED_FONTSIZE: f32 = 50.;
+    pub const FEED_TIMESTAMP_FONTSIZE: f32 = 24.;
+    pub const FEED_TIMESTAMP_WIDTH: f32 = 135.;
+    pub const FEED_LINE_HEIGHT: f32 = 58.;
+    pub const FEED_MESSAGE_SPACING: f32 = 15.;
+    pub const FEED_BASELINE: f32 = 36.;
+    pub const FEED_DATE_FONTSIZE: f32 = 32.;
+    pub const FEED_CHANNEL_SPACING: f32 = 45.;
     pub const RECIPIENT_INPUT_MARGIN: f32 = 30.;
     pub const RECIPIENT_INPUT_PADDING_X: f32 = 40.;
     pub const RECIPIENT_INPUT_HEIGHT: f32 = 120.;
     pub const RECIPIENT_INPUT_FONTSIZE: f32 = 48.;
     pub const HEADER_HEIGHT: f32 = 140.;
-    pub const BACK_SEP_W: f32 = 1.;
     pub const ROW_HEIGHT: f32 = 80.;
     pub const COPY_WIDTH: f32 = 200.;
     pub const COPY_SCALE: f32 = 30.;
@@ -61,6 +84,8 @@ mod android_ui_consts {
 
     pub const PROGRESS_FONTSIZE: f32 = 36.;
     pub const PROGRESS_MARGIN: f32 = 10.;
+
+    pub const DARKFI_LOGO_SCALE: f32 = 40.;
 }
 
 #[cfg(target_os = "android")]
@@ -95,12 +120,35 @@ mod ui_consts {
     pub const TOKEN_NAME_OFFSET: f32 = 90.;
     pub const PADDING_X: f32 = 20.;
     pub const PADDING_Y: f32 = 15.;
+    /// Margin between the feed layers and the screen edges.
+    pub const FEED_LAYER_MARGIN: f32 = 15.;
+    /// Inset padding of the feed view inside its layer (sides and
+    /// bottom; the top is flush under the header).
+    pub const FEED_LAYER_PADDING: f32 = 10.;
+    /// Header band inside the feed layer (the feed chatview starts
+    /// below it).
+    pub const FEED_HEADER_HEIGHT: f32 = 50.;
+    /// Horizontal padding of the header's contents.
+    pub const FEED_HEADER_PAD: f32 = 15.;
+    /// "CHAT" header label font size.
+    pub const FEED_HEADER_FONTSIZE: f32 = 20.;
+    /// The header's down-arrow glyph scale.
+    pub const FEED_ARROW_SCALE: f32 = 30.;
+    pub const FEED_ARROW_Y: f32 = 22.;
+    // Feed chatview styling (mirrors the chat screen's values).
+    pub const FEED_FONTSIZE: f32 = 25.;
+    pub const FEED_TIMESTAMP_FONTSIZE: f32 = 12.;
+    pub const FEED_TIMESTAMP_WIDTH: f32 = 60.;
+    pub const FEED_LINE_HEIGHT: f32 = 30.;
+    pub const FEED_MESSAGE_SPACING: f32 = 5.;
+    pub const FEED_BASELINE: f32 = 20.;
+    pub const FEED_DATE_FONTSIZE: f32 = 16.;
+    pub const FEED_CHANNEL_SPACING: f32 = 24.;
     pub const RECIPIENT_INPUT_MARGIN: f32 = 15.;
     pub const RECIPIENT_INPUT_PADDING_X: f32 = 20.;
     pub const RECIPIENT_INPUT_HEIGHT: f32 = 60.;
     pub const RECIPIENT_INPUT_FONTSIZE: f32 = 20.;
     pub const HEADER_HEIGHT: f32 = 60.;
-    pub const BACK_SEP_W: f32 = 0.5;
     pub const ROW_HEIGHT: f32 = 80.;
     pub const COPY_WIDTH: f32 = 100.;
     pub const COPY_SCALE: f32 = 15.;
@@ -117,6 +165,8 @@ mod ui_consts {
 
     pub const PROGRESS_FONTSIZE: f32 = 14.;
     pub const PROGRESS_MARGIN: f32 = 5.;
+
+    pub const DARKFI_LOGO_SCALE: f32 = 20.;
 }
 
 pub use ui_consts::*;

@@ -26,7 +26,7 @@ use crate::{
     error::{Error, Result},
     expr::{decompile, Compiler, MachineGlobals, SExprCode, SExprMachine, SExprVal},
     gfx::{gfxtag, Renderer},
-    prop::{PropertyType, Role},
+    prop::{PropertyPermission, PropertyType, Role},
     scene::{Pimpl, SceneNodeId, SceneNodePtr, SceneNodeType, ScenePath, Slot},
     ui::{
         get_ui_object3, get_ui_object_ptr, Layer, RedrawTrigger, ShapeVertex, VectorArt,
@@ -54,7 +54,9 @@ fn stop_ui_subtree(node: &SceneNodePtr) {
             Pimpl::EmojiPicker(_) |
             Pimpl::Shortcut(_) |
             Pimpl::Menu(_) |
-            Pimpl::TokenTable(_)
+            Pimpl::TokenTable(_) |
+            Pimpl::Slider(_) |
+            Pimpl::Dropdown(_)
     ) {
         get_ui_object3(node).stop();
     }
@@ -296,9 +298,19 @@ impl ZeroMQAdapter {
                         // This mirrors the old get_value() semantics, where
                         // an unset index with a null default resolved to
                         // null.
-                        let default = &prop.defaults[i];
+                        let default = prop.defaults.lock().unwrap()[i].clone();
                         if default.is_null() {
                             2u8.encode(&mut reply).unwrap();
+                        } else if default.is_expr() {
+                            // An unset index resolving through a default
+                            // expr reports the decompiled expr source under
+                            // the EXPR status. Encoding the SExprCode bytes
+                            // as the payload would desync the client, which
+                            // expects a payload matching the property type
+                            // on the UNSET path.
+                            3u8.encode(&mut reply).unwrap();
+                            let expr = default.as_sexpr().unwrap();
+                            decompile(&expr).encode(&mut reply).unwrap();
                         } else {
                             1u8.encode(&mut reply).unwrap();
                             // Shapes are not serialized on the get path;
@@ -331,31 +343,31 @@ impl ZeroMQAdapter {
 
                 match prop_type {
                     PropertyType::Null => {
-                        prop.set_null(atom, Role::User, prop_i)?;
+                        prop.set_null(atom, Role::Root, prop_i)?;
                     }
                     PropertyType::Bool => {
                         let val = bool::decode(&mut cur).unwrap();
-                        prop.set_bool(atom, Role::User, prop_i, val)?;
+                        prop.set_bool(atom, Role::Root, prop_i, val)?;
                     }
                     PropertyType::Uint32 => {
                         let val = u32::decode(&mut cur).unwrap();
-                        prop.set_u32(atom, Role::User, prop_i, val)?;
+                        prop.set_u32(atom, Role::Root, prop_i, val)?;
                     }
                     PropertyType::Float32 => {
                         let val = f32::decode(&mut cur).unwrap();
-                        prop.set_f32(atom, Role::User, prop_i, val)?;
+                        prop.set_f32(atom, Role::Root, prop_i, val)?;
                     }
                     PropertyType::Str => {
                         let val = String::decode(&mut cur).unwrap();
-                        prop.set_str(atom, Role::User, prop_i, val)?;
+                        prop.set_str(atom, Role::Root, prop_i, val)?;
                     }
                     PropertyType::Enum => {
                         let val = String::decode(&mut cur).unwrap();
-                        prop.set_enum(atom, Role::User, prop_i, val)?;
+                        prop.set_enum(atom, Role::Root, prop_i, val)?;
                     }
                     PropertyType::SceneNodeId => {
                         let val = SceneNodeId::decode(&mut cur).unwrap();
-                        prop.set_node_id(atom, Role::User, prop_i, val)?;
+                        prop.set_node_id(atom, Role::Root, prop_i, val)?;
                     }
                     PropertyType::SExpr => {
                         // Exprs are sent as source strings and compiled here.
@@ -377,7 +389,7 @@ impl ZeroMQAdapter {
                                 .map(|s| s.to_string()),
                         );
                         check_expr(&code, &names)?;
-                        prop.set_expr(atom, Role::User, prop_i, code)?;
+                        prop.set_expr(atom, Role::Root, prop_i, code)?;
                     }
                     PropertyType::VectorShape => {
                         // Vertices carry coordinate exprs as source strings,
@@ -416,7 +428,7 @@ impl ZeroMQAdapter {
                             indices.push(index);
                         }
                         let shape = VectorShape { verts, indices };
-                        prop.set_shape(atom, Role::User, prop_i, shape)?;
+                        prop.set_shape(atom, Role::Root, prop_i, shape)?;
                     }
                 }
             }
@@ -517,7 +529,7 @@ impl ZeroMQAdapter {
                 let prop_subtype = PropertySubType::decode(&mut cur).unwrap();
 
                 debug!(target: "req", "{:?}({}, {}, {:?}, {:?}, ...)", cmd, node_id, prop_name, prop_type, prop_subtype);
-                let mut prop = Property::new(prop_name, prop_type, prop_subtype);
+                let mut prop = Property::new(prop_name, prop_type, prop_subtype, PropertyPermission::default());
 
                 let prop_array_len = u32::decode(&mut cur).unwrap();
                 prop.set_array_len(prop_array_len as usize);

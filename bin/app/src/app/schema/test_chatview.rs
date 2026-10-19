@@ -122,9 +122,13 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     }
     drop(dev_tree);
 
-    let window_scale =
-        PropertyFloat32::wrap(&app.sg_root.lookup_node("/window").unwrap(), Role::App, "scale", 0)
-            .unwrap();
+    let window_scale = PropertyFloat32::wrap(
+        &app.sg_root.lookup_node("/setting").unwrap(),
+        Role::App,
+        "win.scale",
+        0,
+    )
+    .unwrap();
     let chatview_node = node
         .setup(|me| {
             ChatView::new(
@@ -262,7 +266,7 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         DEV_CHANNEL.encode(&mut data).unwrap();
         let _ = chatview_node_for_bind.call_method("set_channel", data).await;
     });
-    app.tasks.lock().unwrap().push(bind_task);
+    app.tasks.lock().push(bind_task);
 
     // Scroll-to-bottom arrow: floats over the chatview, so it carries
     // priority above it for the gesture session's ordered targeting.
@@ -362,7 +366,7 @@ fn populate_tree(tree: &Tree) {
         id_bytes[..8].copy_from_slice(&(idx as u64).to_be_bytes());
         let id = MessageId(id_bytes);
 
-        let payload = codec::encode_privmsg_payload(&nick, &text, true);
+        let payload = codec::encode_privmsg_payload(&nick, &text, true, DEV_CHANNEL);
         let val = codec::encode_value(MsgType::PrivMsg, &payload);
         let key = codec::encode_key(timest, &id);
         tree.insert(&key, &val).unwrap();

@@ -27,11 +27,11 @@ use crate::{
     db::AppDbPtr,
     error::{Error, Result},
     prop::{
-        Property, PropertyAtomicGuard, PropertyPtr, PropertySubType, PropertyType, PropertyValue,
-        Role,
+        Property, PropertyAtomicGuard, PropertyPermission, PropertyPtr, PropertySubType,
+        PropertyType, PropertyValue, Role,
     },
     scene::{CallArgType, Pimpl, SceneNode, SceneNodeType, SceneNodeWeak},
-    ExecutorPtr,
+    theme, ExecutorPtr,
 };
 
 /// Settings when modified are persisted otherwise they use their default
@@ -50,19 +50,69 @@ use crate::{
 ///
 /// Although the `/setting` root has no knowledge of property paths underneath there
 /// is a convention of using `foo.bar.baz` to namespace the settings.
+/// Testnet endpoint from drk_config.toml
+const DARKFID_ENDPOINT_TCP: &str = "tcp+tls://node0.testnet.dark.fi:18345";
+/// TODO: replace with the real darkfid tor endpoint
+const DARKFID_ENDPOINT_TOR: &str = "tor://darkfid-tor-placeholder.onion:18345";
+
 pub fn create_setting(name: &str) -> SceneNode {
     let mut node = SceneNode::new(name, SceneNodeType::Setting);
 
-    let mut prop = Property::new("chat.is_enabled", PropertyType::Bool, PropertySubType::Flag);
+    let mut prop = Property::new(
+        "chat.is_enabled",
+        PropertyType::Bool,
+        PropertySubType::Flag,
+        PropertyPermission::default(),
+    );
     prop.set_defaults_bool(vec![true]).unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("net.transport", PropertyType::Enum, PropertySubType::Null);
+    let mut prop = Property::new(
+        "net.transport",
+        PropertyType::Enum,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_enum_items(vec!["tcp", "tor"]).unwrap();
-    prop.set_defaults_str(vec!["tcp".to_string()]).unwrap();
+    prop.set_default_enum(0, "tcp").unwrap();
     node.add_property(prop).unwrap();
 
-    let mut prop = Property::new("win.scale", PropertyType::Float32, PropertySubType::Null);
+    let mut prop = Property::new(
+        "wallet.tcp.rpc",
+        PropertyType::Str,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
+    prop.set_defaults_str(vec![DARKFID_ENDPOINT_TCP.to_string()]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "wallet.tor.rpc",
+        PropertyType::Str,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
+    prop.set_defaults_str(vec![DARKFID_ENDPOINT_TOR.to_string()]).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "theme",
+        PropertyType::Enum,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
+    prop.set_enum_items(theme::registry().iter().map(|t| t.name()).collect::<Vec<_>>()).unwrap();
+    // Default scifi: the shipped look. A proper Enum variant default
+    // (set_default_enum), unlike the Str-on-Enum latent mismatch above.
+    prop.set_default_enum(0, theme::DEFAULT_THEME).unwrap();
+    node.add_property(prop).unwrap();
+
+    let mut prop = Property::new(
+        "win.scale",
+        PropertyType::Float32,
+        PropertySubType::Null,
+        PropertyPermission::default(),
+    );
     prop.set_defaults_f32(vec![1.]).unwrap();
     prop.set_range_f32(0., f32::MAX);
     node.add_property(prop).unwrap();
@@ -87,10 +137,22 @@ impl Setting {
     pub async fn new(node: SceneNodeWeak, app_db: AppDbPtr, ex: ExecutorPtr) -> Pimpl {
         let node_ref = node.upgrade().unwrap();
 
-        // Load any persisted properties from the db.
-        for (name, idx, data) in app_db.settings_all().await.unwrap() {
-            let prop = node_ref.get_property(&name).unwrap();
-            Self::load_prop(&prop, idx, &data).unwrap();
+        // Load any persisted properties from the db in a fail-safe way
+        let rows = match app_db.settings_all().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(target: "app::setting", "Failed to read settings from db, using defaults: {e}");
+                vec![]
+            }
+        };
+        for (name, idx, data) in rows {
+            let Some(prop) = node_ref.get_property(&name) else {
+                warn!(target: "app::setting", "Skipping unknown persisted setting: {name}");
+                continue
+            };
+            if let Err(e) = Self::load_prop(&prop, idx, &data) {
+                warn!(target: "app::setting", "Skipping persisted setting {name}[{idx}]: {e}");
+            }
         }
 
         // Spawn tasks persisting our properties to the db when they change.

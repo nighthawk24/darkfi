@@ -79,6 +79,7 @@ pub struct Window {
 impl Window {
     pub async fn new(
         node: SceneNodeWeak,
+        scale: PropertyFloat32,
         renderer: Renderer,
         i18n_fish: I18nBabelFish,
         ex: ExecutorPtr,
@@ -88,7 +89,6 @@ impl Window {
         let node_ref = &node.upgrade().unwrap();
         let locale = PropertyStr::wrap(node_ref, Role::Internal, "locale", 0).unwrap();
         let screen_size = PropertyDimension::wrap(node_ref, Role::Internal, "screen_size").unwrap();
-        let scale = PropertyFloat32::wrap(node_ref, Role::Internal, "scale", 0).unwrap();
 
         let gesture_session = GestureSession::new(node.clone(), ex);
 
@@ -490,10 +490,12 @@ impl Window {
     }
 
     async fn handle_mouse_wheel(&self, mut wheel_pos: Point) {
+        t!("handle_mouse_wheel({wheel_pos:?})");
         self.local_scale(&mut wheel_pos);
         for child in self.get_children() {
             let obj = get_ui_object3(&child);
             if obj.handle_mouse_wheel(wheel_pos).await {
+                t!("wheel swallowed by {child:?}");
                 return
             }
         }

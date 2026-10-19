@@ -145,16 +145,6 @@ impl Loader {
         self.wake(Wakeup::FilterChange);
     }
 
-    /// Overwrite the stored entry for this composite key in place
-    /// (confirmation rewrites the payload; never creates a duplicate).
-    pub fn update(&self, ts: Timestamp, id: &MessageId, msg_type: MsgType, payload: &[u8]) {
-        let tree = self.tree.lock();
-        let Some((_, tree)) = tree.as_ref() else { return };
-        let key = codec::encode_key(ts, id);
-        let val = codec::encode_value(msg_type, payload);
-        tree.insert(&key, &val).expect("cannot update chat entry");
-    }
-
     /// Install the record-measuring callback the pump uses to give
     /// loaded records their heights (type nodes lay out text; the
     /// loader stays geometry-free).
@@ -166,23 +156,6 @@ impl Loader {
     /// messages from loaded privmsg text.
     pub fn set_derive(&self, f: Arc<dyn Fn(&MsgRecord) -> Option<MsgRecord> + Send + Sync>) {
         *self.derive.lock() = Some(f);
-    }
-
-    /// Persist a live message into the bound channel tree. Dedup by
-    /// the composite key; returns false when the entry already exists.
-    pub fn store(&self, ts: Timestamp, id: &MessageId, msg_type: MsgType, payload: &[u8]) -> bool {
-        let tree = self.tree.lock();
-        let Some((_, tree)) = tree.as_ref() else { return false };
-        let key = codec::encode_key(ts, id);
-        match tree.contains_key(&key) {
-            Ok(true) => false,
-            Err(_) => false,
-            Ok(false) => {
-                let val = codec::encode_value(msg_type, payload);
-                tree.insert(&key, &val).expect("cannot persist chat entry");
-                true
-            }
-        }
     }
 
     /// The background task: wait for wakes, drain the reason bits,
@@ -233,7 +206,7 @@ impl Loader {
         let shortfall = need - covered;
 
         let tree_guard = self.tree.lock();
-        let Some((tree_name, tree)) = tree_guard.as_ref() else { return };
+        let Some((tree_name, tree)) = &*tree_guard else { return };
         let tree_name = tree_name.clone();
         t!("pump reasons={reasons:#04x} tree={tree_name} covered={covered} need={need}");
 
@@ -242,11 +215,14 @@ impl Loader {
         let mut batch_height = 0.;
         let touched_viewport = covered < scroll + view_h;
 
-        // Iterate newest -> older, resuming below the oldest loaded
-        // composite key.
-        let iter = match buffer.oldest_ts() {
-            Some(oldest) => {
-                let key = codec::encode_key(oldest.saturating_sub(1), &MessageId([0xff; 32]));
+        // Iterate newest -> older, resuming strictly below the oldest
+        // loaded stored record's composite key. Derived separators are
+        // excluded (their midnight key would skip the day's unloaded
+        // remainder), and the exact key keeps same-ts records with
+        // smaller ids reachable.
+        let iter = match buffer.oldest_key() {
+            Some((ts, id)) => {
+                let key = codec::encode_key(ts, &id);
                 tree.range(..key).rev()
             }
             None => tree.iter().rev(),
@@ -259,7 +235,7 @@ impl Loader {
             if !filter(&rec) {
                 continue
             }
-            if let Some(measure) = self.measure.lock().as_ref() {
+            if let Some(measure) = &*self.measure.lock() {
                 rec.height = measure(&rec);
             }
             batch_height += rec.height;
@@ -267,10 +243,10 @@ impl Loader {
             let is_privmsg = rec.msg_type == MsgType::PrivMsg;
             batch.push(rec);
             if is_privmsg {
-                if let Some(derive) = self.derive.lock().as_ref() {
+                if let Some(derive) = &*self.derive.lock() {
                     if let Some(file_rec) = derive(batch.last().unwrap()) {
                         let mut file_rec = file_rec;
-                        if let Some(measure) = self.measure.lock().as_ref() {
+                        if let Some(measure) = &*self.measure.lock() {
                             file_rec.height = measure(&file_rec);
                         }
                         batch_height += file_rec.height;
@@ -291,7 +267,7 @@ impl Loader {
 
         // Separators derived by the batch arrive unmeasured (they are
         // not in the tree); give them heights through the type nodes.
-        if let Some(measure) = self.measure.lock().as_ref() {
+        if let Some(measure) = &*self.measure.lock() {
             let mut ids = vec![];
             for rec in buffer.iter_display_order() {
                 if rec.msg_type.is_derived() && rec.height == 0. {
@@ -330,7 +306,7 @@ mod tests {
             let mut id = [0u8; 32];
             id[0] = *idb;
             let id = MessageId(id);
-            let payload = codec::encode_privmsg_payload("nick", "text", true);
+            let payload = codec::encode_privmsg_payload("nick", "text", true, "#dev");
             let val = codec::encode_value(MsgType::PrivMsg, &payload);
             let key = codec::encode_key(*ts, &id);
             tree.insert(&key, &val).unwrap();
@@ -481,6 +457,62 @@ mod tests {
             .map(|r| if r.msg_type.is_derived() { b'|' } else { r.id.0[0] })
             .collect();
         assert_eq!(kinds, vec![b'c', b'|', b'b', b'a', b'|']);
+    }
+
+    /// Backfill pumps must not skip the unloaded remainder of the
+    /// oldest loaded day: the day separator's midnight key is below the
+    /// day's messages, so a resume point taken from it would jump a
+    /// whole day back and strand the rest of the day unloadable.
+    #[test]
+    fn pump_backfills_rest_of_oldest_loaded_day() {
+        let buffer = Arc::new(AsyncMutex::new(MsgBuffer::new()));
+        let (redraw, _rx) = RedrawTrigger::new();
+        let loader = Loader::new(buffer.clone(), redraw);
+        loader.update_viewport(0., 500.);
+
+        use chrono::{Local, TimeZone};
+        let midnight = |day: i64| {
+            let date =
+                chrono::NaiveDate::from_ymd_opt(2026, 8, 29).unwrap() + chrono::Duration::days(day);
+            let dt = date.and_hms_opt(0, 0, 0).unwrap();
+            Local.from_local_datetime(&dt).unwrap().timestamp_millis() as u64
+        };
+        let m0 = midnight(0);
+        let m1 = midnight(1);
+
+        // Day 1 (newer) holds more than one batch; day 0 holds a few.
+        // Stored ids stay away from the separators' zero id (offset the
+        // day ts by an hour so id 0's composite key cannot collide).
+        let hour = 3_600_000u64;
+        let mut lines = vec![];
+        for i in 0..150u16 {
+            lines.push((m1 + hour + i as u64, i as u8));
+        }
+        for i in 150..165u16 {
+            lines.push((m0 + hour + i as u64, i as u8));
+        }
+        loader.bind("test".to_string(), fixture_db("backfill", &lines));
+
+        smol::block_on(loader.pump(Wakeup::ChannelSwitch.bit()));
+        {
+            let buffer = smol::block_on(buffer.lock());
+            // Batch cap: exactly the newest 100, all on day 1.
+            assert_eq!(buffer.len() - 1, 100, "first pump loads 100 + separator");
+            assert!(buffer.iter_display_order().all(|r| r.ts >= m1));
+        }
+
+        // The bug: this pump resumed below day 1's separator (midnight)
+        // and only found day 0, stranding day 1's older half.
+        smol::block_on(loader.pump(Wakeup::NearTop.bit()));
+        let buffer = smol::block_on(buffer.lock());
+        let ids: Vec<u8> = buffer
+            .iter_display_order()
+            .filter(|r| !r.msg_type.is_derived())
+            .map(|r| r.id.0[0])
+            .collect();
+        assert_eq!(ids.len(), 165, "everything eventually loads");
+        assert_eq!(buffer.oldest_ts(), Some(m0 + hour + 150), "reached the true oldest");
+        assert!(ids.contains(&50), "day 1's older half is present");
     }
 
     #[test]

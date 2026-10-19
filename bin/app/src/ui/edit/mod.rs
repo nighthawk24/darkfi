@@ -38,13 +38,13 @@ use tracing::instrument;
 use crate::android::{is_ime_visible, textinput::AndroidTextInputState};
 use crate::{
     gfx::{
-        anim::Frame as AnimFrame, gfxtag, DrawCall, DrawInstruction, DrawMesh, ManagedSeqAnimPtr,
-        Point, Rectangle, RenderApi, Renderer, Vertex,
+        anim::Frame as AnimFrame, gfxtag, DrawCall, DrawInstruction, ManagedSeqAnimPtr, Point,
+        Rectangle, RenderApi, Renderer, Vertex,
     },
-    mesh::MeshBuilder,
+    mesh::{Color, MeshBuilder},
     prop::{
-        BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyColor, PropertyFloat32,
-        PropertyPtr, PropertyRect, PropertyStr, PropertyUint32, Role,
+        eval_f32_multi, BatchGuardPtr, PropertyAtomicGuard, PropertyBool, PropertyColor,
+        PropertyFloat32, PropertyPtr, PropertyRect, PropertyStr, PropertyUint32, Role,
     },
     scene::{MethodCallSub, Pimpl, SceneNodePtr, SceneNodeWeak},
     text::{self, Editor},
@@ -64,7 +64,7 @@ use filter::{ALLOWED_KEYCODES, DISALLOWED_CHARS};
 mod behave;
 pub use behave::BaseEditType;
 use behave::{EditorBehavior, MultiLine, SingleLine};
-mod repeat;
+pub(crate) mod repeat;
 use repeat::{PressedKey, PressedKeysSmoothRepeat};
 
 /// The travel threshold on long hold select before activating select.
@@ -132,6 +132,13 @@ struct TouchInfo {
 
 pub type BaseEditPtr = Arc<BaseEdit>;
 
+struct CursorRender {
+    anim: ManagedSeqAnimPtr,
+    rect: Rectangle,
+    color: Color,
+    blink_time: u32,
+}
+
 pub struct BaseEdit {
     node: SceneNodeWeak,
     tasks: SyncMutex<Vec<smol::Task<()>>>,
@@ -149,7 +156,7 @@ pub struct BaseEdit {
     select_dc_key: u64,
     text_dc_key: u64,
     cursor_dc_key: u64,
-    cursor_anim: SyncMutex<Option<ManagedSeqAnimPtr>>,
+    cursor_render: SyncMutex<Option<CursorRender>>,
 
     is_active: PropertyBool,
     is_focused: PropertyBool,
@@ -330,7 +337,7 @@ impl BaseEdit {
             select_dc_key: OsRng.gen(),
             text_dc_key: OsRng.gen(),
             cursor_dc_key: OsRng.gen(),
-            cursor_anim: SyncMutex::new(None),
+            cursor_render: SyncMutex::new(None),
 
             is_active,
             is_focused,
@@ -460,25 +467,6 @@ impl BaseEdit {
         cursor_pos + self.behave.inner_pos()
     }
 
-    fn regen_cursor_mesh<R: RenderApi>(&self, renderer: &R) -> DrawMesh {
-        let cursor_width = self.cursor_width.get();
-        let cursor_ascent = self.cursor_ascent.get();
-        let cursor_descent = self.cursor_descent.get();
-        let baseline = self.baseline.get();
-
-        let cursor_rect = Rectangle {
-            x: 0.,
-            y: baseline - cursor_ascent,
-            w: cursor_width,
-            h: cursor_ascent + cursor_descent,
-        };
-        let cursor_color = self.cursor_color.get();
-
-        let mut mesh = MeshBuilder::new(gfxtag!("chatedit_cursor"));
-        mesh.draw_filled_box(&cursor_rect, cursor_color);
-        mesh.alloc(renderer).draw_untextured()
-    }
-
     fn draw_phone_select_handle(&self, mesh: &mut MeshBuilder, mut pos: Point, side: f32) {
         let baseline = self.baseline.get();
         let select_ascent = self.select_ascent.get();
@@ -574,13 +562,19 @@ impl BaseEdit {
         true
     }
 
-    fn handle_key(&self, key: &KeyCode, mods: &KeyMods, atom: &mut PropertyAtomicGuard) -> bool {
+    async fn handle_key(
+        &self,
+        key: &KeyCode,
+        mods: &KeyMods,
+        atom: &mut PropertyAtomicGuard,
+    ) -> bool {
         #[cfg(not(target_os = "macos"))]
         let action_mod = mods.ctrl;
         #[cfg(target_os = "macos")]
         let action_mod = mods.logo;
 
         t!("handle_key({:?}, {:?}) action_mod={action_mod}", key, mods);
+        let mut enter_pressed = false;
         {
             let mut editor = self.editor.lock();
             match key {
@@ -631,9 +625,7 @@ impl BaseEdit {
                             editor.on_buffer_changed(atom);
                         }
                     } else {
-                        //let node = self.node.upgrade().unwrap();
-                        //node.trigger("enter_pressed", vec![]).await.unwrap();
-                        return false;
+                        enter_pressed = true;
                     }
                 }
                 KeyCode::Delete => {
@@ -686,6 +678,16 @@ impl BaseEdit {
             } else {
                 self.select_text.clone().set_null(atom, Role::Internal, 0).unwrap();
             }
+        }
+
+        if enter_pressed {
+            ed!("handle_key: {key:?} pressed, triggering enter_pressed");
+            let node = self.node.upgrade().unwrap();
+            node.trigger("enter_pressed", vec![]).await.unwrap();
+
+            // Still reported as unhandled so the key keeps propagating,
+            // e.g. to sibling shortcut nodes listening for "enter"
+            return false
         }
 
         self.behave.apply_cursor_scroll();
@@ -917,14 +919,7 @@ impl BaseEdit {
     fn gesture_long_press(&self, touch_pos: Point) {
         ed!("gesture_long_press({touch_pos:?}) before=[{}]", self.dbg_state());
 
-        let mut menu = action::Menu::new(
-            self.font_size.get(),
-            self.action_fg_color.get(),
-            self.action_bg_color.get(),
-            self.action_padding.get(),
-            self.action_spacing.get(),
-            self.window_scale.get(),
-        );
+        let mut menu = action::Menu::new();
 
         let atom = &mut self.redraw.make_guard(gfxtag!("BaseEdit::gesture_long_press"));
 
@@ -934,7 +929,7 @@ impl BaseEdit {
         if self.text.get().is_empty() {
             menu.add("Paste", ACTION_PASTE);
             // Set the menu pos to the current cursor pos
-            menu.pos = self.get_cursor_pos();
+            menu.anchor = self.get_cursor_pos();
 
             *self.touch_info.arm.lock() = TouchArm::Inactive;
         } else {
@@ -948,13 +943,7 @@ impl BaseEdit {
                 let editor = self.editor.lock();
                 let (curs_lhs, _) = self.get_select_handles(&editor).unwrap();
                 // Set the menu pos to the LHS of the selection
-                menu.pos = curs_lhs + self.behave.inner_pos();
-            }
-
-            // Adjust menu pos so RHS doesnt leave the RHS of this widget
-            let rect = self.rect.get();
-            if menu.pos.x + menu.total_width() > rect.w {
-                menu.pos.x = rect.w - menu.total_width();
+                menu.anchor = curs_lhs + self.behave.inner_pos();
             }
 
             // Word-selected: release must not set the cursor
@@ -1080,6 +1069,7 @@ impl BaseEdit {
 
         // Move mouse pos within this widget
         self.abs_to_local(&mut clip_mouse_pos);
+        clip_mouse_pos = clip_mouse_pos * self.window_scale.get();
 
         let mut sel_side = 1;
         if let Some(side) = side {
@@ -1167,9 +1157,9 @@ impl BaseEdit {
     /// app-side timed commit and the committed cursor draw call (which
     /// references the anim) never needs to change for pausing.
     fn pause_blinking(&self) {
-        let anim = self.cursor_anim.lock().clone();
-        let Some(anim) = anim else { return };
-        anim.pause(0, self.cursor_idle_time.get() as u64);
+        let cursor = self.cursor_render.lock();
+        let Some(cursor) = &*cursor else { return };
+        cursor.anim.pause(0, self.cursor_idle_time.get() as u64);
     }
 
     #[instrument(target = "ui::edit")]
@@ -1179,8 +1169,44 @@ impl BaseEdit {
         }
 
         let pos = self.get_cursor_pos();
-        let anim = self.cursor_anim.lock().clone().unwrap();
+        let mut cursor = self.cursor_render.lock();
+        self.update_cursor_render(&mut cursor);
+        let anim = cursor.as_ref().unwrap().anim.clone();
         vec![DrawInstruction::Move(pos), DrawInstruction::Animation(anim)]
+    }
+
+    fn update_cursor_render(&self, cursor: &mut Option<CursorRender>) {
+        let rect = Rectangle {
+            x: 0.,
+            y: self.baseline.get() - self.cursor_ascent.get(),
+            w: self.cursor_width.get(),
+            h: self.cursor_ascent.get() + self.cursor_descent.get(),
+        };
+        let color = self.cursor_color.get();
+        let blink_time = self.cursor_blink_time.get();
+        let anim = if let Some(cursor) = &*cursor {
+            if cursor.rect == rect && cursor.color == color && cursor.blink_time == blink_time {
+                return
+            }
+            cursor.anim.clone()
+        } else {
+            self.renderer.new_anim(2, false, gfxtag!("baseedit_cursor_blink"))
+        };
+        let mut mesh = MeshBuilder::new(gfxtag!("chatedit_cursor"));
+        mesh.draw_filled_box(&rect, color);
+        let dc_visible = DrawCall::new(
+            vec![DrawInstruction::Draw(mesh.alloc(&self.renderer).draw_untextured())],
+            vec![],
+            2,
+            "cursor_vis",
+        );
+        // Updating frames preserves the animation's timer and interaction pause.
+        anim.update(0, AnimFrame::new(blink_time, dc_visible));
+        anim.update(
+            1,
+            AnimFrame::new(blink_time, DrawCall::new(vec![], vec![], 2, "cursor_invis")),
+        );
+        *cursor = Some(CursorRender { anim, rect, color, blink_time });
     }
 
     fn regen_bg_mesh<R: RenderApi>(&self, renderer: &R) -> Vec<DrawInstruction> {
@@ -1295,6 +1321,29 @@ impl BaseEdit {
         self.behave.eval_rect(atom);
     }
 
+    /// Draw-path re-evaluation of the expr-bound styling props:
+    /// populates the expression caches before the first read (they are
+    /// empty at startup, before any handler has fired) and self-heals
+    /// stale caches from edge cases such as dependency rewiring. Not
+    /// needed for switch atomicity — the batch guard owns that. Cache
+    /// writes are `Role::Internal` echoes, which the
+    /// when_change_external handlers skip.
+    fn eval_style(&self, atom: &mut PropertyAtomicGuard) {
+        self.text_color.eval(atom).expect("text_color");
+        self.text_hi_color.eval(atom).expect("text_hi_color");
+        self.placeholder_color.eval(atom).expect("placeholder_color");
+        self.cursor_color.eval(atom).expect("cursor_color");
+        self.hi_bg_color.eval(atom).expect("hi_bg_color");
+        self.action_fg_color.eval(atom).expect("action_fg_color");
+        self.action_bg_color.eval(atom).expect("action_bg_color");
+        self.font_size.eval(atom).expect("font_size");
+        self.lineheight.eval(atom).expect("lineheight");
+        eval_f32_multi(&self.padding, atom, Role::Internal, &[0, 1, 2, 3], vec![])
+            .expect("padding");
+        self.action_padding.eval(atom).expect("action_padding");
+        self.action_spacing.eval(atom).expect("action_spacing");
+    }
+
     fn make_draw_calls(&self) -> DrawUpdate {
         let rect = self.rect.get();
 
@@ -1308,7 +1357,17 @@ impl BaseEdit {
         content_instrs.append(&mut bg_instrs);
         content_instrs.push(DrawInstruction::Move(self.behave.scroll()));
 
-        let action_instrs = self.action_mode.get_instrs();
+        let action_instrs = self.action_mode.get_instrs(
+            action::Style {
+                font_size: self.font_size.get(),
+                fg_color: self.action_fg_color.get(),
+                bg_color: self.action_bg_color.get(),
+                padding: self.action_padding.get(),
+                spacing: self.action_spacing.get(),
+                window_scale: self.window_scale.get(),
+            },
+            rect.w,
+        );
 
         // + root (move)
         // -+ content (apply view)
@@ -1623,7 +1682,18 @@ impl UIObject for BaseEdit {
             self_.redraw.trigger();
         }
         async fn set_text(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
+            // An external text change collapses the selection, so any
+            // phone-style selection (and its handles) must be finished
+            // too — the draw pass asserts a non-collapsed selection
+            // while phone-select is active
+            let atom = &mut self_.redraw.make_guard(gfxtag!("BaseEdit::set_text"));
+            self_.finish_select(atom);
             self_.editor.lock().on_text_prop_changed();
+            self_.redraw.trigger();
+        }
+        async fn scale_changed(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
+            self_.editor.lock().refresh();
+            self_.scroll.store(0., Ordering::Release);
             self_.redraw.trigger();
         }
 
@@ -1641,46 +1711,30 @@ impl UIObject for BaseEdit {
         //on_modify.when_change(scroll.prop(), redraw);
         //on_modify.when_change(cursor_pos.prop(), redraw);
         on_modify.when_change_external(self.font_size.prop(), redraw);
+        on_modify.when_change_external(self.window_scale.prop(), scale_changed);
         on_modify.when_change_external(self.text.prop(), reset);
         on_modify.when_change_external(self.text_color.prop(), redraw);
+        on_modify.when_change_external(self.text_hi_color.prop(), redraw);
         on_modify.when_change_external(self.placeholder_text.prop(), redraw);
         on_modify.when_change_external(self.placeholder_color.prop(), redraw);
         on_modify.when_change_external(self.hi_bg_color.prop(), redraw);
+        on_modify.when_change_external(self.action_fg_color.prop(), redraw);
+        on_modify.when_change_external(self.action_bg_color.prop(), redraw);
+        on_modify.when_change_external(self.action_padding.prop(), redraw);
+        on_modify.when_change_external(self.action_spacing.prop(), redraw);
+        // Only multiline edits have a height range.
+        if let Some(height_range) = self.node().get_property("height_range") {
+            on_modify.when_change_external(height_range, redraw);
+        }
         //on_modify.when_change(selected.clone(), redraw);
         on_modify.when_change_external(self.z_index.prop(), redraw);
         on_modify.when_change_external(self.debug.prop(), redraw);
 
-        async fn regen_cursor(self_: Arc<BaseEdit>, _batch: BatchGuardPtr) {
-            // Rebuild the visible frame so cursor style changes apply to
-            // the blink animation.
-            let mesh = self_.regen_cursor_mesh(&self_.renderer);
-            let dc_visible =
-                DrawCall::new(vec![DrawInstruction::Draw(mesh)], vec![], 2, "cursor_vis");
-            if let Some(anim) = self_.cursor_anim.lock().as_ref() {
-                anim.update(0, AnimFrame::new(self_.cursor_blink_time.get(), dc_visible));
-            }
-        }
-        on_modify.when_change_external(self.cursor_color.prop(), regen_cursor);
-        on_modify.when_change_external(self.cursor_ascent.prop(), regen_cursor);
-        on_modify.when_change_external(self.cursor_descent.prop(), regen_cursor);
-        on_modify.when_change_external(self.cursor_width.prop(), regen_cursor);
-
-        // Create the blinking cursor animation using SeqAnim
-        // Frame 0: visible cursor
-        // Frame 1: invisible (empty)
-        let cursor_anim = self.renderer.new_anim(2, false, gfxtag!("baseedit_cursor_blink"));
-        let cursor_mesh = self.regen_cursor_mesh(&self.renderer);
-
-        // Frame 0: visible cursor (just the draw, no position)
-        let dc_visible =
-            DrawCall::new(vec![DrawInstruction::Draw(cursor_mesh)], vec![], 2, "cursor_vis");
-        cursor_anim.update(0, AnimFrame::new(self.cursor_blink_time.get(), dc_visible));
-
-        // Frame 1: invisible (empty draw call)
-        let dc_invisible = DrawCall::new(vec![], vec![], 2, "cursor_invis");
-        cursor_anim.update(1, AnimFrame::new(self.cursor_blink_time.get(), dc_invisible));
-
-        *self.cursor_anim.lock() = Some(cursor_anim);
+        on_modify.when_change_external(self.cursor_color.prop(), redraw);
+        on_modify.when_change_external(self.cursor_ascent.prop(), redraw);
+        on_modify.when_change_external(self.cursor_descent.prop(), redraw);
+        on_modify.when_change_external(self.cursor_width.prop(), redraw);
+        on_modify.when_change_external(self.cursor_blink_time.prop(), redraw);
 
         let (sel_sender, sel_recvr) = async_channel::unbounded();
         *self.sel_sender.lock() = Some(sel_sender);
@@ -1763,6 +1817,7 @@ impl UIObject for BaseEdit {
         atom: &mut PropertyAtomicGuard,
     ) -> Option<DrawUpdate> {
         *self.parent_rect.lock() = Some(parent_rect);
+        self.eval_style(atom);
         self.eval_rect(atom);
         // The fresh eval may have changed the content height, so re-clamp
         // the scroll to keep the cursor in view before computing draw instrs.
@@ -1843,7 +1898,7 @@ impl UIObject for BaseEdit {
 
         let mut is_handled = false;
         for _ in 0..actions {
-            is_handled = self.handle_key(&key, &mods, atom);
+            is_handled = self.handle_key(&key, &mods, atom).await;
         }
         ed!("handle_key_down: {key:?} handled={is_handled} after=[{}]", self.dbg_state());
         is_handled
@@ -1860,14 +1915,7 @@ impl UIObject for BaseEdit {
         }
 
         if btn == MouseButton::Right {
-            let mut menu = action::Menu::new(
-                self.font_size.get(),
-                self.action_fg_color.get(),
-                self.action_bg_color.get(),
-                self.action_padding.get(),
-                self.action_spacing.get(),
-                self.window_scale.get(),
-            );
+            let mut menu = action::Menu::new();
 
             if self.text.get().is_empty() {
                 menu.add("Paste", ACTION_PASTE);
@@ -1878,7 +1926,7 @@ impl UIObject for BaseEdit {
             }
 
             // Mouse pos relative to root layout
-            menu.pos = mouse_pos - rect.pos();
+            menu.anchor = mouse_pos - rect.pos();
 
             self.action_mode.set(menu);
             self.redraw.trigger();
@@ -1910,6 +1958,7 @@ impl UIObject for BaseEdit {
 
         // Move mouse pos within this widget
         self.abs_to_local(&mut mouse_pos);
+        mouse_pos = mouse_pos * self.window_scale.get();
 
         self.editor.lock().driver().move_to_point(mouse_pos.x, mouse_pos.y);
 
@@ -2083,13 +2132,17 @@ impl std::fmt::Debug for BaseEdit {
 }
 
 #[cfg(test)]
+#[path = "tests.rs"]
+mod draw_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::{
         app::node::create_multiline_edit,
         gfx::Renderer,
-        prop::{Property, PropertySubType, PropertyType},
+        prop::{Property, PropertyPermission, PropertySubType, PropertyType},
         scene::{Pimpl, SceneNode, SceneNodeType},
         ui::RedrawTrigger,
     };
@@ -2129,7 +2182,12 @@ mod tests {
             }
 
             let mut scratch = SceneNode::new("scratch", SceneNodeType::Layer);
-            let mut prop = Property::new("scale", PropertyType::Float32, PropertySubType::Null);
+            let mut prop = Property::new(
+                "scale",
+                PropertyType::Float32,
+                PropertySubType::Null,
+                PropertyPermission::default(),
+            );
             prop.set_defaults_f32(vec![1.]).unwrap();
             scratch.add_property(prop).unwrap();
             let window_scale = PropertyFloat32::wrap(&scratch, Role::App, "scale", 0).unwrap();

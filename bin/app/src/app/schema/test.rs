@@ -66,9 +66,9 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
     let atom = &mut PropertyAtomicGuard::none();
 
     let window_scale = PropertyFloat32::wrap(
-        &app.sg_root.lookup_node("/window").unwrap(),
+        &app.sg_root.lookup_node("/setting").unwrap(),
         Role::Internal,
-        "scale",
+        "win.scale",
         0,
     )
     .unwrap();
@@ -398,7 +398,7 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         "chat".encode(&mut data).unwrap();
         let _ = node.call_method("set_channel", data).await;
     });
-    app.tasks.lock().unwrap().push(bind_task);
+    app.tasks.lock().push(bind_task);
 
     // Text edit
     let node = create_singleline_edit("editz");
@@ -495,6 +495,6 @@ pub async fn make(app: &App, window: SceneNodePtr, i18n_fish: &I18nBabelFish) {
         darkfi::system::sleep(1).await;
         node.call_method("focus", vec![]).await.unwrap();
     });
-    app.tasks.lock().unwrap().push(focus_task);
+    app.tasks.lock().push(focus_task);
     */
 }
