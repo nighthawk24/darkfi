@@ -41,7 +41,7 @@ use crate::{
 pub mod chat;
 pub mod menu;
 use menu::channel::Channel;
-mod settings;
+pub mod settings;
 pub mod test;
 pub mod test_chatview;
 pub mod test_edit;

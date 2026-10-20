@@ -106,12 +106,12 @@ mod android_ui_consts {
 }
 
 #[cfg(target_os = "android")]
-mod ui_consts {
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
 #[cfg(feature = "emulate-android")]
-mod ui_consts {
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
@@ -119,7 +119,7 @@ mod ui_consts {
     any(target_os = "linux", target_os = "macos", target_os = "windows"),
     not(feature = "emulate-android")
 ))]
-mod ui_consts {
+pub mod ui_consts {
     pub const LABEL_X: f32 = 20.;
     pub const LABEL_LINESPACE: f32 = 55.;
     pub const LABEL_FONTSIZE: f32 = 22.;
