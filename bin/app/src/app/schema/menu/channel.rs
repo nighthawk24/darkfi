@@ -744,6 +744,10 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "priority", 2).unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
 
+    let theme = app.sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "action_fg_color", &theme, "edit.action_fg_color").unwrap();
+    wire_color(&node, "action_bg_color", &theme, "edit.action_bg_color").unwrap();
+
     node.set_property_str(atom, Role::App, "placeholder_text", "#NAME").unwrap();
     let prop = node.get_property("placeholder_color").unwrap();
     prop.set_default_f32_multi(&[
@@ -855,6 +859,10 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "z_index", 6).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 3).unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
+
+    let theme = app.sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "action_fg_color", &theme, "edit.action_fg_color").unwrap();
+    wire_color(&node, "action_bg_color", &theme, "edit.action_bg_color").unwrap();
 
     node.set_property_str(atom, Role::App, "placeholder_text", "KEY (OPTIONAL)").unwrap();
     let prop = node.get_property("placeholder_color").unwrap();
