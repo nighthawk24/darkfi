@@ -27,7 +27,7 @@
 //! a complete look (design D1/D6).
 
 use parking_lot::Mutex as SyncMutex;
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 
 use tracing::{error, info};
 
@@ -234,9 +234,15 @@ impl ThemeCtx {
         // run once at App::start and never again, so nodes linked at
         // runtime would sit dead — pimpls that load resources in init()
         // (Video::load_video) or register when_change handlers in
-        // start() would never run them. Null pimpls (data-only token
-        // nodes) have no lifecycle to run.
-        if !matches!(child.pimpl(), Pimpl::Null) {
+        // start() would never run them. Nodes linked before App::start
+        // skip this: the startup tree walk covers them, and running the
+        // lifecycle here as well would init/start them twice. Null
+        // pimpls (data-only token nodes) have no lifecycle to run.
+        let mut is_started = true;
+        if let Some(app) = &self.app {
+            is_started = app.is_started.load(Ordering::Acquire);
+        }
+        if !matches!(child.pimpl(), Pimpl::Null) && is_started {
             let obj = get_ui_object3(&child);
             obj.init();
             if let Some(app) = &self.app {
