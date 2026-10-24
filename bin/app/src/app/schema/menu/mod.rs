@@ -69,20 +69,20 @@ mod android_ui_consts {
     pub const BTN_TEXT_FONTSIZE: f32 = 50.;
     pub const BTN_TEXT_Y: f32 = 30.;
     pub const LABEL_LINESPACE: f32 = 60.;
-    pub const WALLET_SQUARE: f32 = 240.;
+    pub const WALLET_SQUARE: f32 = 200.;
     pub const WALLET_BORDER_T: f32 = 1.;
-    pub const WALLET_ICON_SCALE: f32 = 17.25;
-    pub const MENU_ICON_SCALE: f32 = 220.5;
-    pub const SETTINGS_ICON_SCALE: f32 = 55.;
+    pub const WALLET_ICON_SCALE: f32 = 13.6;
+    pub const MENU_ICON_SCALE: f32 = 176.;
+    pub const SETTINGS_ICON_SCALE: f32 = 78.;
 
     pub const DARKFI_LOGO_SCALE: f32 = 40.;
     // Button-column metrics
-    pub const WRITE_BTN_H: f32 = 204.;
-    pub const WRITE_ICON_X: f32 = 219.;
-    pub const WRITE_ICON_Y: f32 = 140.;
+    pub const WRITE_BTN_H: f32 = 200.;
+    pub const WRITE_ICON_X: f32 = 180.;
+    pub const WRITE_ICON_Y: f32 = 220.;
     pub const SETTINGS_BTN_Y: f32 = 244.;
     pub const SETTINGS_ICON_Y: f32 = 364.;
-    pub const BTN_COL_H: f32 = 764.;
+    pub const BTN_COL_H: f32 = 680.;
 }
 
 #[cfg(any(target_os = "android", feature = "emulate-android"))]
