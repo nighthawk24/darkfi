@@ -285,7 +285,6 @@ impl DarkIrc {
         ensure_joined_channels_seeded();
         self_.load_channels_from_db().await;
         self_.load_contacts_from_db().await;
-        self_.clone().start(sg_root, ex).await;
         Ok(Pimpl::DarkIrc(self_))
     }
 
@@ -946,7 +945,11 @@ impl DarkIrc {
         self.p2p.clone().reload().await;
     }
 
-    async fn start(self: Arc<Self>, sg_root: SceneNodePtr, ex: ExecutorPtr) {
+    /// Spawn the plugin's background tasks. Must only be called after the
+    /// owning scene node's `setup()` has completed: the spawned tasks hold
+    /// strong node references across awaits, which would race
+    /// `SceneNode::setup`'s strong_count assertion.
+    pub async fn start(self: Arc<Self>, sg_root: SceneNodePtr, ex: ExecutorPtr) {
         i!("Registering EventGraph P2P protocol");
         let event_graph_ = Arc::clone(&self.event_graph);
         let registry = self.p2p.protocol_registry();

@@ -233,9 +233,10 @@ impl DrkPlugin {
             ex: ex.clone(),
         });
 
-        // Start background task to process build_tx requests from channel
+        // Start background task to process build_tx requests from channel.
+        // Safe to spawn during setup(): it holds no scene node references.
         let me3 = Arc::downgrade(&self_);
-        let build_tx_processor = ex.spawn(async move {
+        ex.spawn(async move {
             while let Ok(request) = build_tx_rx.recv().await {
                 if let Some(self_) = me3.upgrade() {
                     match self_.build_tx_request(request).await {
@@ -249,54 +250,8 @@ impl DrkPlugin {
                     }
                 }
             }
-        });
-
-        let node_ref = node.upgrade().unwrap();
-        let me2 = Arc::downgrade(&self_);
-        let method_sub = node_ref.subscribe_method_call("get_default_address").unwrap();
-        let get_address_task =
-            ex.spawn(
-                async move { while Self::process_get_default_address(&me2, &method_sub).await {} },
-            );
-
-        let node_ref = node.upgrade().unwrap();
-        let me2 = Arc::downgrade(&self_);
-        let method_sub_balances = node_ref.subscribe_method_call("get_balances").unwrap();
-        let get_balances_task = ex.spawn(async move {
-            while Self::process_get_balances(&me2, &method_sub_balances).await {}
-        });
-
-        let node_ref = node.upgrade().unwrap();
-        let me2 = Arc::downgrade(&self_);
-        let method_sub_tx_status = node_ref.subscribe_method_call("get_tx_status").unwrap();
-        let get_tx_status_task = ex.spawn(async move {
-            while Self::process_get_tx_status(&me2, &method_sub_tx_status).await {}
-        });
-
-        let node_ref = node.upgrade().unwrap();
-        let me2 = Arc::downgrade(&self_);
-        let method_sub_build_tx = node_ref.subscribe_method_call("build_tx").unwrap();
-        let build_tx_task =
-            ex.spawn(
-                async move { while Self::process_build_tx(&me2, &method_sub_build_tx).await {} },
-            );
-
-        let node_ref = node.upgrade().unwrap();
-        let me2 = Arc::downgrade(&self_);
-        let method_sub_broadcast_tx = node_ref.subscribe_method_call("broadcast_tx").unwrap();
-        let broadcast_tx_task = ex.spawn(async move {
-            while Self::process_broadcast_tx(&me2, &method_sub_broadcast_tx).await {}
-        });
-
-        let tasks = vec![
-            get_address_task,
-            get_balances_task,
-            get_tx_status_task,
-            build_tx_task,
-            broadcast_tx_task,
-            build_tx_processor,
-        ];
-        self_.clone().start(tasks).await;
+        })
+        .detach();
 
         Ok(Pimpl::Drk(self_))
     }
@@ -1429,7 +1384,51 @@ impl DrkPlugin {
         self.drk.write().await.rpc_client = Some(RwLock::new(new_client));
     }
 
-    async fn start(self: Arc<Self>, tasks: Vec<smol::Task<()>>) {
+    /// Spawn the plugin's background tasks. Must only be called after the
+    /// owning scene node's `setup()` has completed: the spawned tasks hold
+    /// strong node references across awaits, which would race
+    /// `SceneNode::setup`'s strong_count assertion.
+    pub async fn start(self: Arc<Self>) {
+        let node_ref = self.node.upgrade().unwrap();
+
+        let me2 = Arc::downgrade(&self);
+        let method_sub = node_ref.subscribe_method_call("get_default_address").unwrap();
+        let get_address_task = self.ex.spawn(async move {
+            while Self::process_get_default_address(&me2, &method_sub).await {}
+        });
+
+        let me2 = Arc::downgrade(&self);
+        let method_sub_balances = node_ref.subscribe_method_call("get_balances").unwrap();
+        let get_balances_task = self.ex.spawn(async move {
+            while Self::process_get_balances(&me2, &method_sub_balances).await {}
+        });
+
+        let me2 = Arc::downgrade(&self);
+        let method_sub_tx_status = node_ref.subscribe_method_call("get_tx_status").unwrap();
+        let get_tx_status_task = self.ex.spawn(async move {
+            while Self::process_get_tx_status(&me2, &method_sub_tx_status).await {}
+        });
+
+        let me2 = Arc::downgrade(&self);
+        let method_sub_build_tx = node_ref.subscribe_method_call("build_tx").unwrap();
+        let build_tx_task = self.ex.spawn(async move {
+            while Self::process_build_tx(&me2, &method_sub_build_tx).await {}
+        });
+
+        let me2 = Arc::downgrade(&self);
+        let method_sub_broadcast_tx = node_ref.subscribe_method_call("broadcast_tx").unwrap();
+        let broadcast_tx_task = self.ex.spawn(async move {
+            while Self::process_broadcast_tx(&me2, &method_sub_broadcast_tx).await {}
+        });
+
+        let tasks = vec![
+            get_address_task,
+            get_balances_task,
+            get_tx_status_task,
+            build_tx_task,
+            broadcast_tx_task,
+        ];
+
         let me2 = Arc::downgrade(&self);
         let subscribe_task = self.ex.spawn(async move {
             loop {

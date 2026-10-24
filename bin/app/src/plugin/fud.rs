@@ -266,11 +266,14 @@ impl FudPlugin {
             fud,
             tracked_files: Arc::new(Mutex::new(HashSet::new())),
         });
-        self_.clone().start(ex).await;
         Ok(Pimpl::Fud(self_))
     }
 
-    async fn start(self: Arc<Self>, ex: ExecutorPtr) {
+    /// Spawn the plugin's background tasks. Must only be called after the
+    /// owning scene node's `setup()` has completed: the spawned tasks hold
+    /// strong node references across awaits, which would race
+    /// `SceneNode::setup`'s strong_count assertion.
+    pub async fn start(self: Arc<Self>, ex: ExecutorPtr) {
         i!("Registering Fud protocol");
         let registry = self.p2p.protocol_registry();
         let fud = self.fud.clone();

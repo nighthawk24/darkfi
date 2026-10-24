@@ -61,7 +61,7 @@ use crate::{
     db::{AppDb, AppDbPtr},
     gfx::EpochIndex,
     prop::{Property, PropertyPermission, PropertySubType, PropertyType},
-    scene::{CallArgType, SceneNode, SceneNodePtr, SceneNodeType},
+    scene::{CallArgType, Pimpl, SceneNode, SceneNodePtr, SceneNodeType},
     ui::RedrawTrigger,
     util::AsyncRuntime,
 };
@@ -310,6 +310,9 @@ async fn load_plugins(
             })
             .await;
 
+        let Pimpl::DarkIrc(darkirc_impl) = darkirc.pimpl() else { panic!("darkirc pimpl") };
+        darkirc_impl.clone().start(sg_root.clone(), ex.clone()).await;
+
         let (slot, recvr) = Slot::new("recvmsg");
         darkirc.register("recv", slot).unwrap();
         let sg_root2 = sg_root.clone();
@@ -451,6 +454,9 @@ async fn load_plugins(
             })
             .await;
 
+        let Pimpl::Fud(fud_impl) = fud.pimpl() else { panic!("fud pimpl") };
+        fud_impl.clone().start(ex.clone()).await;
+
         let (slot, recv) = Slot::new("file_status_update");
         let _ = fud.register("file_status_updated", slot);
         let sg_root2 = sg_root.clone();
@@ -487,6 +493,9 @@ async fn load_plugins(
                     .expect("Drk pimpl setup")
             })
             .await;
+
+        let Pimpl::Drk(drk_impl) = drk.pimpl() else { panic!("drk pimpl") };
+        drk_impl.clone().start().await;
 
         let (slot, recvr) = Slot::new("connect");
         drk.register("connect", slot).unwrap();
