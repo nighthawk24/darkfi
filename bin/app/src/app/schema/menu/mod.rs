@@ -696,7 +696,9 @@ fn valid_key(s: &str) -> bool {
     bs58::decode(s).into_vec().is_ok_and(|bytes| bytes.len() == 32)
 }
 
-/// Grey an add button out until its name and key are valid
+/// Grey an add button out until its name and key are valid. When
+/// `key_optional` is set, an empty key is also considered valid (public
+/// channels without encryption).
 pub fn setup_add_button_validity(
     app: &App,
     nickedit_node: &SceneNodePtr,
@@ -705,6 +707,7 @@ pub fn setup_add_button_validity(
     btns_bg: SceneNodePtr,
     btns_bg_grey: SceneNodePtr,
     valid_tag: &'static str,
+    key_optional: bool,
 ) {
     let name_text = nickedit_node.get_property("text").unwrap();
     let key_text = secedit_node.get_property("text").unwrap();
@@ -722,7 +725,8 @@ pub fn setup_add_button_validity(
 
             let name = nickedit_handle.get_property_str("text").unwrap();
             let key = keyedit_handle.get_property_str("text").unwrap();
-            let valid = !name.is_empty() && valid_key(&key);
+            let key_valid = if key.is_empty() { key_optional } else { valid_key(&key) };
+            let valid = !name.is_empty() && key_valid;
 
             let atom = &mut redraw.make_guard(gfxtag!(valid_tag));
             btns_bg.set_property_bool(atom, Role::App, "is_visible", valid).unwrap();

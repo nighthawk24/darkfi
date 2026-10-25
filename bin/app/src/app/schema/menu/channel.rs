@@ -56,8 +56,8 @@ use crate::{
     shape,
     theme::wire_color,
     ui::{
-        emoji_picker::EmojiMeshesPtr, BaseEdit, BaseEditType, Button, Layer, Menu, ShapeVertex,
-        Shortcut, Text, UIObject, VectorArt, VectorShape, Window,
+        emoji_picker::EmojiMeshesPtr, BaseEdit, BaseEditType, Button, Layer, Menu, RedrawTrigger,
+        ShapeVertex, Shortcut, Text, UIObject, VectorArt, VectorShape, Window,
     },
     util::i18n::I18nBabelFish,
 };
@@ -163,6 +163,43 @@ async fn unfocus_editors(content: &SceneNodePtr) {
     for name in ["nick_edit", "secret_edit"] {
         let node = content.lookup_node(format!("/content_area/{name}")).unwrap();
         node.call_method("unfocus", vec![]).await.unwrap();
+    }
+}
+
+/// Join `channel` if needed and retarget the one chat screen onto it.
+async fn join_and_open_channel(
+    sg_root: &SceneNodePtr,
+    channel: &str,
+    channel_vis: &PropertyBool,
+    redraw: &RedrawTrigger,
+) {
+    let atom = &mut redraw.make_guard(gfxtag!("join_channel"));
+
+    // One chat screen: an unknown channel is newly joined before
+    // retargeting the chatview.
+    let main_menu = sg_root.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
+    let items_prop = main_menu.get_property("items").unwrap();
+    let is_new = !items_prop.contains_str(channel);
+    if is_new {
+        items_prop.push_str(atom, Role::App, channel).unwrap();
+        append_joined_channel(channel);
+    }
+
+    let node = sg_root.lookup_node("/window/content/chat/main_chat_layer").unwrap();
+    node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
+    channel_vis.set(atom, false);
+    let chatty = node.lookup_node("/content/chatty").unwrap();
+    let mut chan_data = vec![];
+    channel.to_string().encode(&mut chan_data).unwrap();
+    let _ = chatty.call_method("set_channel", chan_data).await;
+
+    if is_new {
+        // Trigger rescan for this channel
+        if let Some(darkirc) = sg_root.lookup_node("/plugin/darkirc") {
+            let mut data = vec![];
+            channel.to_string().encode(&mut data).unwrap();
+            darkirc.call_method("rescan", data).await.unwrap();
+        }
     }
 }
 
@@ -1114,7 +1151,8 @@ pub async fn make(
     editlayer_node.link(node.clone());
     let addchannel_label = node;
 
-    // Grey the button out until name and key are valid
+    // Grey the button out until the name is valid and the key, if
+    // given, is a valid 32-byte base58 key. The key is optional.
     setup_add_button_validity(
         app,
         &nickedit_node,
@@ -1123,6 +1161,7 @@ pub async fn make(
         btns_bg,
         btns_bg_grey,
         "addchannel_valid",
+        true,
     );
 
     // Generate-secret button: mirrors add-channel button, positioned on the left.
@@ -1286,6 +1325,7 @@ pub async fn make(
     let menu_prop2 = menu_node.get_property("items").unwrap();
     let redraw2 = app.redraw_trigger.clone();
     let sg_root2 = app.sg_root.clone();
+    let channel_vis2 = channel_is_visible.clone();
 
     let save_channel = app.ex.spawn(async move {
         while let Ok(_) = addchannel_recvr.recv().await {
@@ -1305,14 +1345,18 @@ pub async fn make(
 
             let channel_name = format!("#{}", name);
 
-            if !valid_key(&secret) {
+            let secret = if secret.is_empty() {
+                None
+            } else if valid_key(&secret) {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bs58::decode(&secret).into_vec().unwrap());
+                Some(arr)
+            } else {
                 w!("Invalid channel secret: expected a 32-byte key in base58");
-                continue;
-            }
+                continue
+            };
 
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bs58::decode(&secret).into_vec().unwrap());
-            let channel = Channel { name: name.to_string(), secret: Some(arr) };
+            let channel = Channel { name: name.to_string(), secret };
 
             app_db2.channel_insert(&channel).await.unwrap();
 
@@ -1324,6 +1368,12 @@ pub async fn make(
             let atom = &mut redraw2.make_guard(gfxtag!("clear_channel_fields"));
             name_prop.set_str(atom, Role::App, 0, "").unwrap();
             secret_prop.set_str(atom, Role::App, 0, "").unwrap();
+
+            nickedit2.call_method("unfocus", vec![]).await.unwrap();
+            secedit2.call_method("unfocus", vec![]).await.unwrap();
+
+            // Jump straight into the freshly added channel
+            join_and_open_channel(&sg_root2, &channel_name, &channel_vis2, &redraw2).await;
         }
     });
 
@@ -1347,38 +1397,7 @@ pub async fn make(
         while let Ok(data) = recvr.recv().await {
             let channel: String = deserialize(&data).unwrap();
             i!("Selected channel: {channel}");
-
-            let atom = &mut redraw2.make_guard(gfxtag!("channel_selected"));
-            let main_menu =
-                sg_root.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
-            let items_prop = main_menu.get_property("items").unwrap();
-
-            // One chat screen: a channel already in the menu just
-            // retargets the chatview; an unknown one is newly joined.
-            if items_prop.contains_str(&channel) {
-                let node = sg_root.lookup_node("/window/content/chat/main_chat_layer").unwrap();
-                node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
-                channel_vis.set(atom, false);
-                let chatty = node.lookup_node("/content/chatty").unwrap();
-                let mut chan_data = vec![];
-                channel.encode(&mut chan_data).unwrap();
-                let _ = chatty.call_method("set_channel", chan_data).await;
-                continue
-            }
-
-            items_prop.push_str(atom, Role::App, &channel).unwrap();
-            append_joined_channel(&channel);
-
-            // Hide channel screen
-            channel_vis.set(atom, false);
-            redraw2.trigger();
-
-            // Trigger rescan for this channel
-            if let Some(darkirc) = sg_root.lookup_node("/plugin/darkirc") {
-                let mut data = vec![];
-                channel.encode(&mut data).unwrap();
-                darkirc.call_method("rescan", data).await.unwrap();
-            }
+            join_and_open_channel(&sg_root, &channel, &channel_vis, &redraw2).await;
         }
     });
 

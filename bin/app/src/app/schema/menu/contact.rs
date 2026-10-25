@@ -1341,6 +1341,7 @@ pub async fn make(
         btns_bg,
         btns_bg_grey,
         "addcontact_valid",
+        false,
     );
 
     // Create cancel/done edit buttons at bottom of screen
