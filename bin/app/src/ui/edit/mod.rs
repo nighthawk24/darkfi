@@ -1807,6 +1807,7 @@ impl UIObject for BaseEdit {
     fn stop(&self) {
         self.tasks.lock().clear();
         *self.parent_rect.lock() = None;
+        *self.cursor_render.lock() = None;
         self.key_repeat.lock().clear();
     }
 
