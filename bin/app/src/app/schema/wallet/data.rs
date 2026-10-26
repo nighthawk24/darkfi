@@ -54,6 +54,12 @@ mod android_ui_consts {
     /// The header's down-arrow glyph scale.
     pub const FEED_ARROW_SCALE: f32 = 60.;
     pub const FEED_ARROW_Y: f32 = 44.;
+    /// Scale of the channels "#" glyph beside the "CHAT" header label.
+    pub const FEED_CHANNELS_ICON_SCALE: f32 = 20.;
+    pub const FEED_CHANNELS_ICON_X: f32 = FEED_HEADER_PAD + 0.9 * FEED_CHANNELS_ICON_SCALE;
+    pub const FEED_CHANNELS_ICON_Y: f32 = FEED_HEADER_HEIGHT / 2. + 0.35 * FEED_CHANNELS_ICON_SCALE;
+    /// Left edge of the "CHAT" label, nudged right of the channels icon.
+    pub const FEED_LABEL_X: f32 = FEED_CHANNELS_ICON_X + FEED_CHANNELS_ICON_SCALE + 24.;
     // Feed chatview styling (mirrors the chat screen's values).
     pub const FEED_FONTSIZE: f32 = 50.;
     pub const FEED_TIMESTAMP_FONTSIZE: f32 = 24.;
@@ -135,6 +141,12 @@ mod ui_consts {
     /// The header's down-arrow glyph scale.
     pub const FEED_ARROW_SCALE: f32 = 30.;
     pub const FEED_ARROW_Y: f32 = 22.;
+    /// Scale of the channels "#" glyph beside the "CHAT" header label.
+    pub const FEED_CHANNELS_ICON_SCALE: f32 = 10.;
+    pub const FEED_CHANNELS_ICON_X: f32 = FEED_HEADER_PAD + 0.9 * FEED_CHANNELS_ICON_SCALE;
+    pub const FEED_CHANNELS_ICON_Y: f32 = FEED_HEADER_HEIGHT / 2. + 0.35 * FEED_CHANNELS_ICON_SCALE;
+    /// Left edge of the "CHAT" label, nudged right of the channels icon.
+    pub const FEED_LABEL_X: f32 = FEED_CHANNELS_ICON_X + FEED_CHANNELS_ICON_SCALE + 12.;
     // Feed chatview styling (mirrors the chat screen's values).
     pub const FEED_FONTSIZE: f32 = 25.;
     pub const FEED_TIMESTAMP_FONTSIZE: f32 = 12.;

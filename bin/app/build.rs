@@ -23,6 +23,20 @@ use std::{
     process::Command,
 };
 
+/// Exposes the short commit hash of the build as the `COMMITISH` env
+/// var (read with `option_env!("COMMITISH")`). Falls back to "unknown"
+/// when git is unavailable, e.g. release tarballs.
+fn export_commitish() {
+    let output = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let commitish = String::from_utf8_lossy(&output.stdout);
+            println!("cargo:rustc-env=COMMITISH={}", commitish.trim());
+        }
+    }
+}
+
 /// Adds a temporary workaround for [an issue] with the Rust compiler and Android when
 /// compiling sqlite3 bundled C code.
 ///
@@ -75,6 +89,8 @@ fn main() {
             ),
         }
     }
+
+    export_commitish();
 }
 
 /// Embeds `release/win/darkfi.ico` as the exe icon on Windows targets,

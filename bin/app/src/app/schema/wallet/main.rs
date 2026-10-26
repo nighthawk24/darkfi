@@ -28,7 +28,7 @@ use crate::{
     },
     expr,
     gfx::{gfxtag, Point},
-    mesh::{rgba, COLOR_CYAN, COLOR_TEAL},
+    mesh::{rgba, COLOR_CYAN, COLOR_MINT, COLOR_TEAL},
     prop::{PropertyAtomicGuard, PropertyBool, PropertyFloat32, Role},
     scene::{Pimpl, SceneNodePtr, Slot},
     shape,
@@ -928,9 +928,9 @@ async fn create_chat_btn(
     parent.link(node);
 }
 
-/// Build the feed header into `parent`: a "CHAT" label on the left, a
-/// chevron arrow on the right (pointing down in the expanded layer, up
-/// in the rolled strip), and the full-header `hide_feed` toggle button
+/// Build the feed header into `parent`: a channels "#" glyph with a
+/// "CHAT" label on the left, a chevron arrow on the right (pointing
+/// down in the expanded layer, up in the rolled strip), and the full-header `hide_feed` toggle button
 /// (returned; the caller wires its click — expansion vs. rolling
 /// depends on which layer this is). The header band's background is
 /// part of the layer's `bg` shape, not a node of its own.
@@ -945,10 +945,11 @@ async fn make_feed_header(
 ) -> crate::error::Result<SceneNodePtr> {
     let atom = &mut PropertyAtomicGuard::none();
 
-    // "CHAT" label on the left, vertically centered.
+    // "CHAT" label on the left, vertically centered, nudged right of
+    // the channels icon.
     let node = create_text("feed_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, FEED_HEADER_PAD).unwrap();
+    prop.set_default_f32(0, FEED_LABEL_X).unwrap();
     prop.set_default_f32(1, (FEED_HEADER_HEIGHT - FEED_HEADER_FONTSIZE) / 2.).unwrap();
     prop.set_default_expr(2, expr::load_var("w")).unwrap();
     prop.set_default_f32(3, FEED_HEADER_FONTSIZE).unwrap();
@@ -968,6 +969,21 @@ async fn make_feed_header(
             )
         })
         .await;
+    parent.link(node);
+
+    // Channels "#" glyph before the "CHAT" label, same construction as
+    // the channel config screen's tab icon.
+    let node = create_vector_art("feed_channels_icon");
+    let prop = node.get_property("rect").unwrap();
+    prop.set_default_f32(0, FEED_CHANNELS_ICON_X).unwrap();
+    prop.set_default_f32(1, FEED_CHANNELS_ICON_Y).unwrap();
+    prop.set_default_f32(2, FEED_CHANNELS_ICON_SCALE).unwrap();
+    prop.set_default_f32(3, FEED_CHANNELS_ICON_SCALE).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
+    let shape = shape::create_channels_icon(COLOR_MINT).scaled(FEED_CHANNELS_ICON_SCALE);
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     parent.link(node);
 
     // Down arrow on the right, vertically centered.
