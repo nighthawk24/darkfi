@@ -76,8 +76,9 @@ impl PruneMethodHeap {
             if epoch < self.epoch {
                 // Discard old rubbish
                 t!(
-                    "Discard method with old epoch: {epoch} curr: {} [method={method:?}]",
-                    self.epoch
+                    "Discard method with old epoch: {epoch} curr: {} [method={}]",
+                    self.epoch,
+                    method.log_desc()
                 );
                 continue
             }
