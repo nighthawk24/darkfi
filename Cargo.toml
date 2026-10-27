@@ -60,13 +60,13 @@ futures-rustls = {version = "0.26.0", default-features = false, features = ["log
 
 # Pluggable Transports
 socket2 = {version = "0.6.3", features = ["all"], optional = true}
-arti-client = {version = "0.45.0", default-features = false, features = ["async-std", "compression", "error_detail", "rustls", "onion-service-client", "onion-service-service"], optional = true}
-tor-error = {version = "0.45.0", optional = true}
-tor-rtcompat = {version = "0.45.0", features = ["async-std", "rustls"], optional = true}
-tor-hscrypto = {version = "0.45.0", optional = true}
-tor-hsservice = {version = "0.45.0", optional = true}
-tor-proto = {version = "0.45.0", optional = true}
-tor-cell = {version = "0.45.0", optional = true}
+arti-client = {version = "0.47.0", default-features = false, features = ["async-std", "compression", "error_detail", "rustls", "onion-service-client", "onion-service-service"], optional = true}
+tor-error = {version = "0.47.0", optional = true}
+tor-rtcompat = {version = "0.47.0", features = ["async-std", "rustls"], optional = true}
+tor-hscrypto = {version = "0.47.0", optional = true}
+tor-hsservice = {version = "0.47.0", optional = true}
+tor-proto = {version = "0.47.0", optional = true}
+tor-cell = {version = "0.47.0", optional = true}
 quinn-smol = {git="https://github.com/parazyd/quinn", branch="main", default-features = false, features = ["rustls-ring", "runtime-smol"], optional = true}
 
 # TLS cert utilities
@@ -103,7 +103,7 @@ nu-ansi-term = {version = "0.50.3", optional = true}
 
 # Crypto
 rand = {version = "0.8.6", optional = true}
-blake3 = {version = "1.8.5", features = ["rayon"], optional = true}
+blake3 = {version = "1.8.3", features = ["rayon"], optional = true}
 crypto_api_chachapoly = {version = "0.5.0", optional = true}
 halo2_proofs = {version = "0.3.2", features = ["circuit-params"], optional = true}
 halo2_gadgets = {version = "0.5.0", features = ["circuit-params"], optional = true}
@@ -116,10 +116,10 @@ wasmer-compiler-singlepass = {version = "6.1.0", optional = true}
 wasmer-middlewares = {version = "6.1.0", optional = true}
 
 # Blockchain store
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0", optional = true}
+kvdb-overlay = {git = "https://gitlab.com/nighthawk24/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0", optional = true}
 
 # Miner
-randomx = {git = "https://git.dark.fi/darkrenaissance/RandomX", rev = "0e31d5a", optional = true}
+randomx = {git = "https://codeberg.org/darkrenaissance/RandomX", rev = "0e31d5a", optional = true}
 monero = {version = "0.21.0", optional = true}
 tiny-keccak = { version = "2.0.2", features = ["keccak"], optional = true }
 
@@ -330,7 +330,7 @@ dht = [
 halo2_proofs = {git="https://github.com/parazyd/halo2", branch="v050"}
 halo2_gadgets = {git="https://github.com/parazyd/halo2", branch="v050"}
 # Forked "url" crate with added P2P schemas
-url = {git="https://git.dark.fi/darkrenaissance/rust-url", branch="v258"}
+url = {git="https://github.com/darkrenaissance/rust-url", branch="v258"}
 
 [[bench]]
 name = "zk_arith"

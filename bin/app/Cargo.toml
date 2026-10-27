@@ -40,14 +40,14 @@ futures = "0.3.32"
 async-recursion = "1.1.1"
 colored = "3.1.1"
 #rustpython-vm = "0.3.1"
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
+kvdb-overlay = {git = "https://gitlab.com/nighthawk24/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 turso = "0.7.0-pre.14"
 url = "2.5.8"
 semver = "1.0.28"
 chrono = "0.4.44"
 async-gen = "0.2.3"
 async-trait = "0.1.89"
-blake3 = "1.8.5"
+blake3 = "1.8.3"
 clap = { version = "4.6.1", features = ["derive"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt"] }
 tracing-appender = "0.2.5"

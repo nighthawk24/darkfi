@@ -22,10 +22,10 @@ darkfi-sdk = {path = "../../src/sdk", features = ["async"]}
 darkfi-serial = {path = "../../src/serial"}
 
 # Misc
-blake3 = "1.8.5"
+blake3 = "1.8.3"
 bs58 = "0.5.1"
 futures = "0.3.32"
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
+kvdb-overlay = {git = "https://gitlab.com/nighthawk24/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 lazy_static = "1.5.0"
 libc = "0.2"
 num-bigint = "0.4.6"

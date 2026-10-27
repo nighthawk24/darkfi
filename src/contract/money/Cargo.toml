@@ -9,7 +9,7 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-blake3 = "1.8.5"
+blake3 = "1.8.3"
 bs58 = "0.5.1"
 darkfi-sdk = { path = "../../sdk", features = ["wasm"] }
 darkfi-serial = { path = "../../serial", features = ["derive", "crypto"] }

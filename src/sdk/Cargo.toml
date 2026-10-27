@@ -31,7 +31,7 @@ sha2 = "0.11.0"
 
 # Cryptography
 blake2b_simd = "1.0.4"
-blake3 = "1.8.5"
+blake3 = "1.8.3"
 chacha20poly1305 = "0.10.1"
 halo2_gadgets = "0.5.0"
 bridgetree = "0.7.0"
@@ -47,7 +47,7 @@ subtle = "2.6.1"
 hashbrown = {version = "0.17.1", optional = true}
 
 # Storage
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0", optional = true}
+kvdb-overlay = {git = "https://gitlab.com/nighthawk24/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0", optional = true}
 
 [dev-dependencies]
 halo2_proofs = {version = "0.3.2", features = ["circuit-params", "dev-graph", "sanity-checks"]}

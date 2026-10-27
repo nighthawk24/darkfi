@@ -28,7 +28,7 @@ darkfi-serial = {path = "../../src/serial", features = ["async"]}
 libc = "0.2.186"
 
 # Event Graph DB
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
+kvdb-overlay = {git = "https://gitlab.com/nighthawk24/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 
 # TLS
 async-trait = "0.1.89"
@@ -37,7 +37,7 @@ futures-rustls = {version = "0.26.0", default-features = false, features = ["log
 rustls-pemfile = "2.2.0"
 
 # Crypto
-blake3 = "1.8.5"
+blake3 = "1.8.3"
 bcrypt = "0.19.1"
 crypto_box = {version = "0.9.1", features = ["std", "chacha20"]}
 rand = "0.8.6"

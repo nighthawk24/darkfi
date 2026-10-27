@@ -27,7 +27,7 @@ sha2 = "0.11.0"
 
 # Misc
 async-trait = "0.1.89"
-blake3 = "1.8.5"
+blake3 = "1.8.3"
 rand = "0.8.6"
 tracing = "0.1.44"
 tinyjson = "2.5.1"
@@ -48,7 +48,7 @@ blake2 = "0.10.6"
 equix = "0.6.1"
 
 # Database
-kvdb-overlay = {git = "https://git.dark.fi/darkrenaissance/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
+kvdb-overlay = {git = "https://gitlab.com/nighthawk24/kvdb-overlay", rev = "accd2689f42e17d8db05294fbe9c3dac1ef307f4", version = "0.1.0"}
 
 # Argument parsing
 serde = {version = "1.0.228", features = ["derive"]}
