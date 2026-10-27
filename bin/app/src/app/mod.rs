@@ -71,6 +71,8 @@ pub struct App {
     /// True on the first run of a new app version, i.e. when no version
     /// or a different one is recorded in the app DB. Loaded in `setup()`.
     pub is_first_time: AtomicBool,
+    /// True once App::start() has finished its init/start tree walks.
+    pub is_started: AtomicBool,
     /// The installed theme's ctx (journal, tracked nodes); `None` when
     /// the minimal baseline is active. The active theme name lives in
     /// `/setting/theme`.
@@ -91,6 +93,7 @@ impl App {
             redraw_trigger,
             redraw_rx,
             is_first_time: AtomicBool::new(false),
+            is_started: AtomicBool::new(false),
             theme_ctx: SyncMutex::new(None),
             kv_db: std::sync::OnceLock::new(),
         })
@@ -243,6 +246,8 @@ impl App {
         self.redraw_trigger.trigger();
 
         self.start_procs(event_pub).await;
+
+        self.is_started.store(true, Ordering::Release);
         i!("App started");
     }
 

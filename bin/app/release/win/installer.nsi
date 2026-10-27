@@ -9,9 +9,15 @@
 !define ABOUTURL "https://dark.fi"
 !define INSTALLSIZE 100000
 
+!ifndef VERSION
 !define VERSION "@VERSION@"
+!endif
+!ifndef DIST_DIR
 !define DIST_DIR "@DIST_DIR@"
+!endif
+!ifndef OUTPUT_FILE
 !define OUTPUT_FILE "@OUTPUT_FILE@"
+!endif
 
 RequestExecutionLevel admin
 
@@ -49,4 +55,4 @@ Section "uninstall"
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
 SectionEnd
 
-!finalize "${OUTPUT_FILE}"
+OutFile "${OUTPUT_FILE}"

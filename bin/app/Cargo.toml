@@ -82,6 +82,7 @@ emulate-android = []
 enable-filelog = []
 # Network debugging. Should be disabled in release.
 enable-netdebug = []
+enable-debug-gfxapi = []
 
 enable-plugin-darkirc = ["dep:darkirc", "dep:crypto_box"]
 enable-plugin-fud = ["dep:fud"]

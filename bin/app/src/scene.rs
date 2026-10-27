@@ -177,7 +177,9 @@ impl SceneNode {
         }
 
         let pimpl = pimpl_fn(weak_self).await;
-        assert_eq!(Arc::strong_count(&self_), 1);
+        if Arc::strong_count(&self_) != 1 {
+            panic!("Strong count for scene node {} is not 1", self_.name);
+        }
         self_.pimpl.set(pimpl).unwrap();
         self_
     }
@@ -191,7 +193,9 @@ impl SceneNode {
             prop.set_parent(weak_self.clone());
         }
 
-        assert_eq!(Arc::strong_count(&self_), 1);
+        if Arc::strong_count(&self_) != 1 {
+            panic!("Strong count for scene node {} is not 1", self_.name);
+        }
         self_.pimpl.set(Pimpl::Null).unwrap();
         self_
     }

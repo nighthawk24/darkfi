@@ -1,18 +1,16 @@
 #!/bin/bash
 set -e
 
-VERSION=${1:-"dev"}
-PROFILE=${2:-"release"}
-TARGET=${3:-"x86_64-pc-windows-gnu"}
-DIST_DIR="darkfi-win64-${VERSION}"
+VERSION="0.4"
+DIST_DIR="darkfi-${VERSION}"
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
 # Copy binary
-cp "target/${TARGET}/${PROFILE}/darkfi-app.exe" "${DIST_DIR}/"
+cp "../../darkfi-app.exe" "${DIST_DIR}/"
 
 # Copy assets
-cp -r assets "${DIST_DIR}/"
+cp -r ../../assets "${DIST_DIR}/"
 
 # Create README
 cat > "${DIST_DIR}/README.txt" <<EOF
@@ -28,7 +26,7 @@ echo "Created: ${DIST_DIR}.zip"
 # Create NSIS installer
 makensis -DVERSION="${VERSION}" -DDIST_DIR="${DIST_DIR}" \
     -DOUTPUT_FILE="darkfi-win64-${VERSION}-installer.exe" \
-    release/win/installer.nsi
+    installer.nsi
 
 echo "Created: darkfi-win64-${VERSION}-installer.exe"
 rm -rf "${DIST_DIR}"

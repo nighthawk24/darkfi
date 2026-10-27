@@ -69,6 +69,9 @@ use crate::{
 
 // This is very noisy so suppress output by default
 const DEBUG_RENDER: bool = false;
+#[cfg(feature = "enable-debug-gfxapi")]
+const DEBUG_GFXAPI: bool = true;
+#[cfg(not(feature = "enable-debug-gfxapi"))]
 const DEBUG_GFXAPI: bool = false;
 
 #[macro_export]
@@ -549,7 +552,15 @@ impl<'a> RenderContext<'a> {
                     self.ctx.draw(0, mesh.num_elements, 1);
                 }
                 GfxDrawInstruction::Animation(anim) => {
-                    let gfx_anim = self.anims.get_mut(&anim.id).unwrap();
+                    let Some(gfx_anim) = self.anims.get_mut(&anim.id) else {
+                        panic!(
+                            "Missing anim id={} epoch={} tag={:?} known_anims={:?}",
+                            anim.id,
+                            anim.epoch,
+                            anim.tag,
+                            self.anims.keys().collect::<Vec<_>>()
+                        );
+                    };
                     gfx_anim.is_visible = true;
                     if let Some(dc) = gfx_anim.tick() {
                         self.draw_call(&dc, indent + 1, is_debug);
@@ -933,8 +944,9 @@ impl Stage {
             if epoch < self.epoch {
                 // Discard old rubbish
                 t!(
-                    "Discard method with old epoch: {epoch} curr: {} [method={method:?}]",
-                    self.epoch
+                    "Discard method with old epoch: {epoch} curr: {} [method={}]",
+                    self.epoch,
+                    method.log_desc()
                 );
                 continue
             }

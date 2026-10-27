@@ -32,19 +32,47 @@ use crate::{
     app::{
         node::{create_vector_art, create_video},
         schema::{
-            wallet::data::{CHAT_BTN_MARGIN, CHAT_BTN_SIZE, FEED_HEADER_HEIGHT},
+            chat::ui_consts::{
+                BACKARROW_BG_W as CHAT_BACKARROW_BG_W, BACKARROW_SCALE as CHAT_BACKARROW_SCALE,
+                BACKARROW_X as CHAT_BACKARROW_X, BACKARROW_Y as CHAT_BACKARROW_Y, CHATEDIT_HEIGHT,
+            },
+            menu::{
+                channel::ui_consts::{
+                    BACKARROW_BG_W as CHANNEL_BACKARROW_BG_W,
+                    BACKARROW_SCALE as CHANNEL_BACKARROW_SCALE, BACKARROW_X as CHANNEL_BACKARROW_X,
+                    BACKARROW_Y as CHANNEL_BACKARROW_Y, BACK_SEP_W,
+                    HEADER_HEIGHT as CHANNEL_HEADER_HEIGHT,
+                },
+                contact::ui_consts::{
+                    BACKARROW_BG_W as CONTACT_BACKARROW_BG_W,
+                    BACKARROW_SCALE as CONTACT_BACKARROW_SCALE, BACKARROW_X as CONTACT_BACKARROW_X,
+                    BACKARROW_Y as CONTACT_BACKARROW_Y, HEADER_HEIGHT as CONTACT_HEADER_HEIGHT,
+                },
+            },
+            settings::ui_consts::{
+                BACKARROW_BG_W as SETTINGS_BACKARROW_BG_W,
+                BACKARROW_SCALE as SETTINGS_BACKARROW_SCALE, BACKARROW_X as SETTINGS_BACKARROW_X,
+                BACKARROW_Y as SETTINGS_BACKARROW_Y, SETTING_LABEL_LINESPACE,
+            },
+            wallet::data::{
+                BACKARROW_BG_W as WALLET_BACKARROW_BG_W, BACKARROW_SCALE as WALLET_BACKARROW_SCALE,
+                BACKARROW_X as WALLET_BACKARROW_X, BACKARROW_Y as WALLET_BACKARROW_Y,
+                CHAT_BTN_MARGIN, CHAT_BTN_SIZE, FEED_HEADER_HEIGHT,
+                HEADER_HEIGHT as WALLET_HEADER_HEIGHT,
+            },
             MAIN_MENU_HEADER_HEIGHT, VID_ASPECT_RATIO, VID_PATH,
         },
     },
     error::{Error, Result},
     expr::{self, Compiler},
-    gfx::gfxtag,
+    gfx::{gfxtag, Point},
     mesh::rgba,
     prop::{
-        Property, PropertyAtomicGuard, PropertyFloat32, PropertyPermission, PropertySubType,
-        PropertyType, PropertyValue, Role,
+        Property, PropertyAtomicGuard, PropertyPermission, PropertySubType, PropertyType,
+        PropertyValue, Role,
     },
     scene::{SceneNode, SceneNodeType},
+    shape,
     theme::{Theme, ThemeCtx},
     ui::{VectorArt, VectorShape, Video},
 };
@@ -272,12 +300,99 @@ async fn scifi_apply(ctx: &ThemeCtx) -> Result<()> {
     let parent = ctx.sg_root().lookup_node("/window/content/wallet/main_layer").unwrap();
     ctx.link_tracked(&parent, node);
 
+    // The shared header keeps the schema's black band and bottom
+    // separator, but swaps the minimal monotone fade for the original
+    // scifi fade: dark green over black fading out through cyan.
+    // Journaled so unload reverts to the schema default.
+    let node = ctx.sg_root().lookup_node("/window/content/header_bg").unwrap();
+    let mut shape = VectorShape::new();
+    shape.add_filled_box(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::load_var("w"),
+        expr::load_var("h"),
+        [0., 0., 0., 1.],
+    );
+    shape.add_filled_box(
+        expr::const_f32(0.),
+        expr::load_var("h"),
+        expr::load_var("w"),
+        cc.compile("h + 0.5").unwrap(),
+        [0.41, 0.6, 0.65, 1.],
+    );
+    shape.add_smooth_vertical_gradient(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::load_var("w"),
+        cc.compile("h / 2").unwrap(),
+        [0., 0.17, 0.18, 0.5],
+        [0., 0.88, 1., 0.],
+        8,
+        0.2,
+    );
+    let prop = node.get_property("shape").unwrap();
+    ctx.set_touched(atom, &prop, 0, PropertyValue::VectorShape(std::sync::Arc::new(shape)))?;
+
     // ------------------------------------------------------------------
-    // 5. First-run scramble splash (theme content, design D12)
+    // 5. Back button square bgs: the pre-theme toolbar square (dark
+    //    teal fill + cyan separator) behind every back arrow, drawn
+    //    into the screens' existing back button bg nodes — the node
+    //    names and paths stay exactly as they were — as journaled
+    //    rect+shape overrides, so unload restores the arrow-only
+    //    schema defaults.
+    // ------------------------------------------------------------------
+    back_btn_square(
+        ctx,
+        "/window/content/chat/main_chat_layer/back_btn_bg",
+        CHAT_BACKARROW_BG_W,
+        CHATEDIT_HEIGHT,
+        CHAT_BACKARROW_X,
+        CHAT_BACKARROW_Y,
+        CHAT_BACKARROW_SCALE,
+    )?;
+    back_btn_square(
+        ctx,
+        "/window/content/chat/contact_screen_layer/back_btn_bg",
+        CONTACT_BACKARROW_BG_W,
+        CONTACT_HEADER_HEIGHT,
+        CONTACT_BACKARROW_X,
+        CONTACT_BACKARROW_Y,
+        CONTACT_BACKARROW_SCALE,
+    )?;
+    back_btn_square(
+        ctx,
+        "/window/content/chat/channel_screen_layer/back_btn_bg",
+        CHANNEL_BACKARROW_BG_W,
+        CHANNEL_HEADER_HEIGHT,
+        CHANNEL_BACKARROW_X,
+        CHANNEL_BACKARROW_Y,
+        CHANNEL_BACKARROW_SCALE,
+    )?;
+    back_btn_square(
+        ctx,
+        "/window/content/wallet/wallet_back_btn_bg",
+        WALLET_BACKARROW_BG_W,
+        WALLET_HEADER_HEIGHT,
+        WALLET_BACKARROW_X,
+        WALLET_BACKARROW_Y,
+        WALLET_BACKARROW_SCALE,
+    )?;
+    back_btn_square(
+        ctx,
+        "/window/content/settings_layer/back_btn_bg",
+        SETTINGS_BACKARROW_BG_W,
+        SETTING_LABEL_LINESPACE,
+        SETTINGS_BACKARROW_X,
+        SETTINGS_BACKARROW_Y,
+        SETTINGS_BACKARROW_SCALE,
+    )?;
+
+    // ------------------------------------------------------------------
+    // 6. First-run scramble splash (theme content, design D12)
     // ------------------------------------------------------------------
 
     // ------------------------------------------------------------------
-    // 6. Netstatus overlay fade: watch is_visible, animate alpha via
+    // 7. Netstatus overlay fade: watch is_visible, animate alpha via
     //    the ctx (touched-set dedups the per-step journal entries).
     //    Replaces the in-handler fade from the reconnect click handler.
     // ------------------------------------------------------------------
@@ -317,6 +432,54 @@ async fn scifi_apply(ctx: &ThemeCtx) -> Result<()> {
     });
     ctx.push_task(&token_child, fade_task);
 
+    Ok(())
+}
+
+/// The scifi back button square: the pre-theme toolbar square (dark
+/// teal fill, cyan separator on its right edge) with the back arrow
+/// drawn into the screen's existing back button bg node. The rect and
+/// shape are overridden as journaled vals, so unload restores the
+/// arrow-only schema defaults.
+fn back_btn_square(
+    ctx: &ThemeCtx,
+    node_path: &str,
+    bg_w: f32,
+    height: f32,
+    arrow_x: f32,
+    arrow_y: f32,
+    arrow_scale: f32,
+) -> Result<()> {
+    let node = ctx.sg_root().lookup_node(node_path).unwrap();
+    let atom = &mut PropertyAtomicGuard::none();
+
+    let rect = node.get_property("rect").unwrap();
+    ctx.set_touched(atom, &rect, 0, PropertyValue::Float32(0.))?;
+    ctx.set_touched(atom, &rect, 1, PropertyValue::Float32(0.))?;
+    ctx.set_touched(atom, &rect, 2, PropertyValue::Float32(bg_w + BACK_SEP_W))?;
+    ctx.set_touched(atom, &rect, 3, PropertyValue::Float32(height))?;
+
+    let mut shape = VectorShape::new();
+    shape.add_filled_box(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::const_f32(bg_w),
+        expr::load_var("h"),
+        [0.0, 0.106, 0.114, 1.0],
+    );
+    shape.add_filled_box(
+        expr::const_f32(bg_w),
+        expr::const_f32(0.),
+        expr::const_f32(bg_w + BACK_SEP_W),
+        expr::load_var("h"),
+        [0.41, 0.6, 0.65, 1.],
+    );
+    shape.join(
+        shape::create_back_arrow([0., 1., 1., 1.])
+            .scaled(arrow_scale)
+            .offset(Point::new(arrow_x, arrow_y)),
+    );
+    let prop = node.get_property("shape").unwrap();
+    ctx.set_touched(atom, &prop, 0, PropertyValue::VectorShape(std::sync::Arc::new(shape)))?;
     Ok(())
 }
 

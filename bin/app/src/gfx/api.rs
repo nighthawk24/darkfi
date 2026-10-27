@@ -85,9 +85,9 @@ impl std::fmt::Debug for ManagedBuffer {
 pub struct ManagedSeqAnim {
     frames_len: usize,
     pub id: AnimId,
-    epoch: u32,
+    pub(super) epoch: u32,
     renderer: Renderer,
-    tag: DebugTag,
+    pub(super) tag: DebugTag,
 }
 
 impl ManagedSeqAnim {
@@ -346,5 +346,26 @@ impl std::fmt::Debug for GraphicsMethod {
 impl Default for GraphicsMethod {
     fn default() -> Self {
         GraphicsMethod::Noop
+    }
+}
+
+impl GraphicsMethod {
+    /// Resource-bearing description used by discard logs
+    pub fn log_desc(&self) -> String {
+        match self {
+            Self::NewTexture((_, _, _, _, id, _)) => format!("NewTexture(id={id})"),
+            Self::DeleteTexture((id, _)) => format!("DeleteTexture(id={id})"),
+            Self::NewVertexBuffer((_, id, _)) => format!("NewVertexBuffer(id={id})"),
+            Self::NewIndexBuffer((_, id, _)) => format!("NewIndexBuffer(id={id})"),
+            Self::DeleteBuffer((id, _, _)) => format!("DeleteBuffer(id={id})"),
+            Self::NewSeqAnim { id, .. } => format!("NewSeqAnim(id={id})"),
+            Self::UpdateSeqAnim { id, frame_idx, .. } => {
+                format!("UpdateSeqAnim(id={id}, frame={frame_idx})")
+            }
+            Self::PauseSeqAnim { id, .. } => format!("PauseSeqAnim(id={id})"),
+            Self::DeleteSeqAnim((id, _)) => format!("DeleteSeqAnim(id={id})"),
+            Self::ReplaceGfxDrawCalls { .. } => "ReplaceGfxDrawCalls".to_string(),
+            Self::Noop => "Noop".to_string(),
+        }
     }
 }

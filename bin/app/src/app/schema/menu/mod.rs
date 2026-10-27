@@ -69,20 +69,20 @@ mod android_ui_consts {
     pub const BTN_TEXT_FONTSIZE: f32 = 50.;
     pub const BTN_TEXT_Y: f32 = 30.;
     pub const LABEL_LINESPACE: f32 = 60.;
-    pub const WALLET_SQUARE: f32 = 240.;
+    pub const WALLET_SQUARE: f32 = 200.;
     pub const WALLET_BORDER_T: f32 = 1.;
-    pub const WALLET_ICON_SCALE: f32 = 17.25;
-    pub const MENU_ICON_SCALE: f32 = 220.5;
-    pub const SETTINGS_ICON_SCALE: f32 = 55.;
+    pub const WALLET_ICON_SCALE: f32 = 13.6;
+    pub const MENU_ICON_SCALE: f32 = 176.;
+    pub const SETTINGS_ICON_SCALE: f32 = 78.;
 
     pub const DARKFI_LOGO_SCALE: f32 = 40.;
     // Button-column metrics
-    pub const WRITE_BTN_H: f32 = 204.;
-    pub const WRITE_ICON_X: f32 = 219.;
-    pub const WRITE_ICON_Y: f32 = 140.;
+    pub const WRITE_BTN_H: f32 = 200.;
+    pub const WRITE_ICON_X: f32 = 180.;
+    pub const WRITE_ICON_Y: f32 = 220.;
     pub const SETTINGS_BTN_Y: f32 = 244.;
     pub const SETTINGS_ICON_Y: f32 = 364.;
-    pub const BTN_COL_H: f32 = 764.;
+    pub const BTN_COL_H: f32 = 680.;
 }
 
 #[cfg(any(target_os = "android", feature = "emulate-android"))]
@@ -696,7 +696,9 @@ fn valid_key(s: &str) -> bool {
     bs58::decode(s).into_vec().is_ok_and(|bytes| bytes.len() == 32)
 }
 
-/// Grey an add button out until its name and key are valid
+/// Grey an add button out until its name and key are valid. When
+/// `key_optional` is set, an empty key is also considered valid (public
+/// channels without encryption).
 pub fn setup_add_button_validity(
     app: &App,
     nickedit_node: &SceneNodePtr,
@@ -705,6 +707,7 @@ pub fn setup_add_button_validity(
     btns_bg: SceneNodePtr,
     btns_bg_grey: SceneNodePtr,
     valid_tag: &'static str,
+    key_optional: bool,
 ) {
     let name_text = nickedit_node.get_property("text").unwrap();
     let key_text = secedit_node.get_property("text").unwrap();
@@ -722,7 +725,8 @@ pub fn setup_add_button_validity(
 
             let name = nickedit_handle.get_property_str("text").unwrap();
             let key = keyedit_handle.get_property_str("text").unwrap();
-            let valid = !name.is_empty() && valid_key(&key);
+            let key_valid = if key.is_empty() { key_optional } else { valid_key(&key) };
+            let valid = !name.is_empty() && key_valid;
 
             let atom = &mut redraw.make_guard(gfxtag!(valid_tag));
             btns_bg.set_property_bool(atom, Role::App, "is_visible", valid).unwrap();

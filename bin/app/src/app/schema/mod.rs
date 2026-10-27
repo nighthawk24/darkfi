@@ -29,7 +29,7 @@ use crate::{
     },
     db::AppDbPtr,
     expr::{self, Compiler},
-    gfx::gfxtag,
+    gfx::{gfxtag, Point},
     mesh::rgba,
     prop::{PropertyAtomicGuard, PropertyEnum, PropertyFloat32, PropertyStr, Role},
     scene::{SceneNodePtr, Slot},
@@ -41,7 +41,7 @@ use crate::{
 pub mod chat;
 pub mod menu;
 use menu::channel::Channel;
-mod settings;
+pub mod settings;
 pub mod test;
 pub mod test_chatview;
 pub mod test_edit;
@@ -54,8 +54,45 @@ macro_rules! e { ($($arg:tt)*) => { error!(target: "app::schema", $($arg)*); } }
 #[cfg(any(target_os = "android", feature = "emulate-android"))]
 mod android_ui_consts {
     pub const MAIN_MENU_HEADER_HEIGHT: f32 = 140.;
-    pub const MAIN_MENU_PADDING: f32 = 20.;
-    pub const SWITCH_THEME_BTN_H: f32 = 100.;
+    pub const MAIN_MENU_PADDING: f32 = 80.;
+    pub const MAIN_MENU_OVERLAY_H: f32 = 920.;
+    pub const MAIN_MENU_BOX_OUTLINE_T: f32 = 2.;
+    pub const MAIN_MENU_BTN_W: f32 = 240.;
+    pub const MAIN_MENU_BTN_H: f32 = 240.;
+    pub const MAIN_MENU_BTN_GAP: f32 = 20.;
+    pub const MAIN_MENU_BTN_OUTLINE_T: f32 = 4.;
+    pub const MAIN_MENU_THEME_LABEL_Y: f32 = 120.;
+    pub const MAIN_MENU_LABEL_FONTSIZE: f32 = 56.;
+    pub const MAIN_MENU_CURR_THEME_FONTSIZE: f32 = 64.;
+    pub const MAIN_MENU_BTN_LABEL_X: f32 = 160.;
+    pub const MAIN_MENU_ABOUT_Y: f32 = 400.;
+    pub const MAIN_MENU_ABOUT_LABEL_Y: f32 = 440.;
+    pub const MAIN_MENU_EXIT_Y: f32 = 600.;
+    pub const MAIN_MENU_EXIT_LABEL_Y: f32 = 640.;
+    pub const MAIN_MENU_EXIT_W: f32 = 440.;
+    pub const MAIN_MENU_EXIT_H: f32 = 160.;
+    pub const MAIN_MENU_OTHER_BG_W: f32 = 440.;
+    pub const MAIN_MENU_OTHER_BG_H: f32 = 600.;
+    pub const MAIN_MENU_ABOUT_OUTLINE_W: f32 = 320.;
+    pub const MAIN_MENU_ABOUT_OUTLINE_H: f32 = 160.;
+    pub const MAIN_MENU_EXIT_OUTLINE_Y: f32 = 200.;
+    pub const MAIN_MENU_EXIT_OUTLINE_H: f32 = 360.;
+    /// Theme switcher buttons are 1/3 smaller than the other menu
+    /// buttons on android.
+    pub const MAIN_MENU_THEME_BTN_W: f32 = MAIN_MENU_BTN_W * 2. / 3.;
+    pub const MAIN_MENU_THEME_BTN_H: f32 = MAIN_MENU_BTN_H * 2. / 3.;
+    /// Footprint of both theme switcher buttons plus the gap: the left
+    /// button sits at `w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTNS_W`.
+    pub const MAIN_MENU_THEME_BTNS_W: f32 = 2. * MAIN_MENU_THEME_BTN_W + MAIN_MENU_BTN_GAP;
+    /// Scale of the left/right chevrons on the theme switcher buttons.
+    pub const MAIN_MENU_THEME_ARROW_SCALE: f32 = 2.;
+    /// Approximate width of the "THEME" label text.
+    pub const MAIN_MENU_THEME_LABEL_W: f32 = 180.;
+    /// Approximate width of the current theme name text.
+    pub const MAIN_MENU_CURR_THEME_LABEL_W: f32 = 280.;
+    /// Size of the centered about box.
+    pub const MAIN_MENU_ABOUT_BOX_W: f32 = 640.;
+    pub const MAIN_MENU_ABOUT_BOX_H: f32 = 320.;
     pub const NETSTATUS_ICON_SIZE: f32 = 140.;
     pub const NETLOGO_SCALE: f32 = 50.;
     pub const EMOJI_PICKER_ICON_SIZE: f32 = 120.;
@@ -145,8 +182,44 @@ mod ui_consts {
 ))]
 mod ui_consts {
     pub const MAIN_MENU_HEADER_HEIGHT: f32 = 60.;
-    pub const MAIN_MENU_PADDING: f32 = 10.;
-    pub const SWITCH_THEME_BTN_H: f32 = 50.;
+    pub const MAIN_MENU_PADDING: f32 = 40.;
+    pub const MAIN_MENU_OVERLAY_H: f32 = 460.;
+    pub const MAIN_MENU_BOX_OUTLINE_T: f32 = 1.;
+    pub const MAIN_MENU_BTN_W: f32 = 120.;
+    pub const MAIN_MENU_BTN_H: f32 = 120.;
+    pub const MAIN_MENU_BTN_GAP: f32 = 10.;
+    pub const MAIN_MENU_BTN_OUTLINE_T: f32 = 2.;
+    pub const MAIN_MENU_THEME_LABEL_Y: f32 = 60.;
+    pub const MAIN_MENU_LABEL_FONTSIZE: f32 = 28.;
+    pub const MAIN_MENU_CURR_THEME_FONTSIZE: f32 = 32.;
+    pub const MAIN_MENU_BTN_LABEL_X: f32 = 80.;
+    pub const MAIN_MENU_ABOUT_Y: f32 = 200.;
+    pub const MAIN_MENU_ABOUT_LABEL_Y: f32 = 220.;
+    pub const MAIN_MENU_EXIT_Y: f32 = 300.;
+    pub const MAIN_MENU_EXIT_LABEL_Y: f32 = 320.;
+    pub const MAIN_MENU_EXIT_W: f32 = 220.;
+    pub const MAIN_MENU_EXIT_H: f32 = 80.;
+    pub const MAIN_MENU_OTHER_BG_W: f32 = 220.;
+    pub const MAIN_MENU_OTHER_BG_H: f32 = 300.;
+    pub const MAIN_MENU_ABOUT_OUTLINE_W: f32 = 160.;
+    pub const MAIN_MENU_ABOUT_OUTLINE_H: f32 = 80.;
+    pub const MAIN_MENU_EXIT_OUTLINE_Y: f32 = 100.;
+    pub const MAIN_MENU_EXIT_OUTLINE_H: f32 = 180.;
+    /// Theme switcher buttons match the other menu buttons on desktop.
+    pub const MAIN_MENU_THEME_BTN_W: f32 = MAIN_MENU_BTN_W;
+    pub const MAIN_MENU_THEME_BTN_H: f32 = MAIN_MENU_BTN_H;
+    /// Footprint of both theme switcher buttons plus the gap: the left
+    /// button sits at `w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTNS_W`.
+    pub const MAIN_MENU_THEME_BTNS_W: f32 = 2. * MAIN_MENU_THEME_BTN_W + MAIN_MENU_BTN_GAP;
+    /// Scale of the left/right chevrons on the theme switcher buttons.
+    pub const MAIN_MENU_THEME_ARROW_SCALE: f32 = 1.;
+    /// Approximate width of the "THEME" label text.
+    pub const MAIN_MENU_THEME_LABEL_W: f32 = 90.;
+    /// Approximate width of the current theme name text.
+    pub const MAIN_MENU_CURR_THEME_LABEL_W: f32 = 140.;
+    /// Size of the centered about box.
+    pub const MAIN_MENU_ABOUT_BOX_W: f32 = 320.;
+    pub const MAIN_MENU_ABOUT_BOX_H: f32 = 160.;
     pub const NETSTATUS_ICON_SIZE: f32 = 60.;
     pub const NETLOGO_SCALE: f32 = 25.;
     pub const EMOJI_PICKER_ICON_SIZE: f32 = 40.;
@@ -255,6 +328,12 @@ pub async fn make(
 ) {
     let mut cc = Compiler::new();
     cc.add_const_f32("MAIN_MENU_PADDING", MAIN_MENU_PADDING);
+    cc.add_const_f32("MAIN_MENU_THEME_BTN_W", MAIN_MENU_THEME_BTN_W);
+    cc.add_const_f32("MAIN_MENU_THEME_BTNS_W", MAIN_MENU_THEME_BTNS_W);
+    cc.add_const_f32("MAIN_MENU_THEME_LABEL_W", MAIN_MENU_THEME_LABEL_W);
+    cc.add_const_f32("MAIN_MENU_CURR_THEME_LABEL_W", MAIN_MENU_CURR_THEME_LABEL_W);
+    cc.add_const_f32("MAIN_MENU_ABOUT_BOX_W", MAIN_MENU_ABOUT_BOX_W);
+    cc.add_const_f32("MAIN_MENU_ABOUT_BOX_H", MAIN_MENU_ABOUT_BOX_H);
     cc.add_const_f32("MAIN_MENU_HEADER_HEIGHT", MAIN_MENU_HEADER_HEIGHT);
     cc.add_const_f32("NETSTATUS_ICON_SIZE", NETSTATUS_ICON_SIZE);
     cc.add_const_f32("NETSTAT_OVERLAY_MARGIN", NETSTAT_OVERLAY_MARGIN);
@@ -339,7 +418,7 @@ pub async fn make(
     prop.set_default_f32(0, 0.).unwrap();
     prop.set_default_f32(1, MAIN_MENU_HEADER_HEIGHT).unwrap();
     prop.set_default_expr(2, expr::load_var("w")).unwrap();
-    prop.set_default_f32(3, 460.).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_OVERLAY_H).unwrap();
     main_menu_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
     main_menu_layer.set_property_u32(atom, Role::App, "z_index", 10).unwrap();
     main_menu_layer.set_property_u32(atom, Role::App, "priority", 10).unwrap();
@@ -388,7 +467,7 @@ pub async fn make(
         expr::const_f32(0.),
         expr::load_var("w"),
         expr::load_var("h"),
-        1.,
+        MAIN_MENU_BOX_OUTLINE_T,
         rgba!(0x00F0FFff),
     );
     node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
@@ -398,11 +477,11 @@ pub async fn make(
 
     let node = create_text("theme_txt_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, 40.).unwrap();
-    prop.set_default_f32(1, 60.).unwrap();
+    prop.set_default_f32(0, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_THEME_LABEL_Y).unwrap();
     prop.set_default_f32(2, 1000.).unwrap();
     prop.set_default_f32(3, 1000.).unwrap();
-    node.get_property("font_size").unwrap().set_default_f32(0, 28.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, MAIN_MENU_LABEL_FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "THEME").unwrap();
     let prop = node.get_property("text_color").unwrap();
     prop.set_default_f32_multi(&rgba!(0x77FFBEff)).unwrap();
@@ -423,12 +502,23 @@ pub async fn make(
 
     let node = create_text("curr_theme_label");
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w / 2").unwrap();
+    // Centered between the "THEME" label's right edge and the left
+    // theme button's left edge, minus half the label's approx width.
+    let code = cc
+        .compile(
+            "(MAIN_MENU_PADDING + MAIN_MENU_THEME_LABEL_W \
+             + w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTNS_W) / 2 \
+             - MAIN_MENU_CURR_THEME_LABEL_W / 2",
+        )
+        .unwrap();
     prop.set_default_expr(0, code).unwrap();
-    prop.set_default_f32(1, 60.).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_THEME_LABEL_Y).unwrap();
     prop.set_default_f32(2, 1000.).unwrap();
     prop.set_default_f32(3, 1000.).unwrap();
-    node.get_property("font_size").unwrap().set_default_f32(0, 32.).unwrap();
+    node.get_property("font_size")
+        .unwrap()
+        .set_default_f32(0, MAIN_MENU_CURR_THEME_FONTSIZE)
+        .unwrap();
     let setting_node = app.sg_root.lookup_node("/setting").unwrap();
     let curr_theme = setting_node.get_property_enum("theme").unwrap();
     node.set_property_str(atom, Role::App, "text", curr_theme).unwrap();
@@ -450,37 +540,33 @@ pub async fn make(
     let theme_label = PropertyStr::wrap(&node, Role::App, "text", 0).unwrap();
     main_menu_layer.link(node);
 
-    // PADDING: 40
-    // BTN_H: 120
-    // BTN_GAP: 10
-
     // Switch theme button (green bg). Cycles /setting/theme through
     // the registry (minimal, scifi, light); the engine-owned watcher
     // applies the live switch.
     let node = create_vector_art("theme_btn_bg");
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - 40 - 120 - 10 - 120").unwrap();
+    let code = cc.compile("w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTNS_W").unwrap();
     prop.set_default_expr(0, code).unwrap();
-    prop.set_default_f32(1, 40.).unwrap();
-    prop.set_default_f32(2, 120.).unwrap();
-    prop.set_default_f32(3, 120.).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_THEME_BTN_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_THEME_BTN_H).unwrap();
     node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
     let mut shape = VectorShape::new();
     shape.add_outline(
         expr::const_f32(0.),
         expr::const_f32(0.),
-        expr::const_f32(120.),
-        expr::const_f32(120.),
-        2.,
+        expr::const_f32(MAIN_MENU_THEME_BTN_W),
+        expr::const_f32(MAIN_MENU_THEME_BTN_H),
+        MAIN_MENU_BTN_OUTLINE_T,
         rgba!(0x14AEB8ff),
     );
     shape.add_outline(
-        expr::const_f32(120. + 10.),
+        expr::const_f32(MAIN_MENU_THEME_BTN_W + MAIN_MENU_BTN_GAP),
         expr::const_f32(0.),
-        expr::const_f32(2. * 120. + 10.),
-        expr::const_f32(120.),
-        2.,
+        expr::const_f32(2. * MAIN_MENU_THEME_BTN_W + MAIN_MENU_BTN_GAP),
+        expr::const_f32(MAIN_MENU_THEME_BTN_H),
+        MAIN_MENU_BTN_OUTLINE_T,
         rgba!(0x14AEB8ff),
     );
     node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
@@ -493,11 +579,11 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - 40 - 120 - 10 - 120").unwrap();
+    let code = cc.compile("w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTNS_W").unwrap();
     prop.set_default_expr(0, code).unwrap();
-    prop.set_default_f32(1, 40.).unwrap();
-    prop.set_default_f32(2, 120.).unwrap();
-    prop.set_default_f32(3, 120.).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_THEME_BTN_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_THEME_BTN_H).unwrap();
 
     let sg_root = app.sg_root.clone();
     let redraw = app.redraw_trigger.clone();
@@ -532,11 +618,11 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
     let prop = node.get_property("rect").unwrap();
-    let code = cc.compile("w - 40 - 120").unwrap();
+    let code = cc.compile("w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTN_W").unwrap();
     prop.set_default_expr(0, code).unwrap();
-    prop.set_default_f32(1, 40.).unwrap();
-    prop.set_default_f32(2, 120.).unwrap();
-    prop.set_default_f32(3, 120.).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_THEME_BTN_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_THEME_BTN_H).unwrap();
 
     let sg_root = app.sg_root.clone();
     let redraw = app.redraw_trigger.clone();
@@ -565,15 +651,54 @@ pub async fn make(
         node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
     main_menu_layer.link(node);
 
+    // Theme switcher chevrons: the feed header's arrow with x and y
+    // flipped, so they point left (prev) and right (next).
+    let arrow_y = MAIN_MENU_PADDING + MAIN_MENU_THEME_BTN_H / 2.;
+    let node = create_vector_art("prev_theme_arrow");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc
+        .compile("w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTNS_W + MAIN_MENU_THEME_BTN_W / 2")
+        .unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, arrow_y).unwrap();
+    prop.set_default_f32(2, 30. * MAIN_MENU_THEME_ARROW_SCALE).unwrap();
+    prop.set_default_f32(3, 30. * MAIN_MENU_THEME_ARROW_SCALE).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+    let mut shape = VectorShape::new();
+    shape.add_line(Point::new(-12., 0.), Point::new(7.5, -15.), 1., rgba!(0x00F0FFff));
+    shape.add_line(Point::new(-12., 0.), Point::new(7.5, 15.), 1., rgba!(0x00F0FFff));
+    let shape = shape.scaled(MAIN_MENU_THEME_ARROW_SCALE);
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    main_menu_layer.link(node);
+
+    let node = create_vector_art("next_theme_arrow");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w - MAIN_MENU_PADDING - MAIN_MENU_THEME_BTN_W / 2").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    prop.set_default_f32(1, arrow_y).unwrap();
+    prop.set_default_f32(2, 30. * MAIN_MENU_THEME_ARROW_SCALE).unwrap();
+    prop.set_default_f32(3, 30. * MAIN_MENU_THEME_ARROW_SCALE).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+    let mut shape = VectorShape::new();
+    shape.add_line(Point::new(12., 0.), Point::new(-7.5, -15.), 1., rgba!(0x00F0FFff));
+    shape.add_line(Point::new(12., 0.), Point::new(-7.5, 15.), 1., rgba!(0x00F0FFff));
+    let shape = shape.scaled(MAIN_MENU_THEME_ARROW_SCALE);
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    main_menu_layer.link(node);
+
     let node = create_button("about_btn");
     node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, 40.).unwrap();
-    prop.set_default_f32(1, 200.).unwrap();
-    prop.set_default_f32(2, 120.).unwrap();
-    prop.set_default_f32(3, 120.).unwrap();
+    prop.set_default_f32(0, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_ABOUT_Y).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_BTN_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_BTN_H).unwrap();
 
     let sg_root = app.sg_root.clone();
     let redraw = app.redraw_trigger.clone();
@@ -583,6 +708,11 @@ pub async fn make(
     let listen_click = ex.spawn(async move {
         while recvr.recv().await.is_ok() {
             i!("clicked about");
+            let atom = &mut redraw.make_guard(gfxtag!("about"));
+            let main_menu_layer = sg_root.lookup_node("/window/content/main_menu_layer").unwrap();
+            main_menu_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
+            let about_layer = sg_root.lookup_node("/window/content/about_layer").unwrap();
+            about_layer.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
         }
     });
     app.tasks.lock().push(listen_click);
@@ -596,10 +726,10 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "z_index", 2).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 1).unwrap();
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, 40.).unwrap();
-    prop.set_default_f32(1, 300.).unwrap();
-    prop.set_default_f32(2, 220.).unwrap();
-    prop.set_default_f32(3, 80.).unwrap();
+    prop.set_default_f32(0, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_EXIT_Y).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_EXIT_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_EXIT_H).unwrap();
 
     let sg_root = app.sg_root.clone();
     let redraw = app.redraw_trigger.clone();
@@ -623,27 +753,27 @@ pub async fn make(
 
     let node = create_vector_art("other_btn_bg");
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, 40.).unwrap();
-    prop.set_default_f32(1, 200.).unwrap();
-    prop.set_default_f32(2, 220.).unwrap();
-    prop.set_default_f32(3, 300.).unwrap();
+    prop.set_default_f32(0, MAIN_MENU_PADDING).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_ABOUT_Y).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_OTHER_BG_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_OTHER_BG_H).unwrap();
     node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
     node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
     let mut shape = VectorShape::new();
     shape.add_outline(
         expr::const_f32(0.),
         expr::const_f32(0.),
-        expr::const_f32(160.),
-        expr::const_f32(80.),
-        2.,
+        expr::const_f32(MAIN_MENU_ABOUT_OUTLINE_W),
+        expr::const_f32(MAIN_MENU_ABOUT_OUTLINE_H),
+        MAIN_MENU_BTN_OUTLINE_T,
         rgba!(0x14AEB8ff),
     );
     shape.add_outline(
         expr::const_f32(0.),
-        expr::const_f32(100.),
-        expr::const_f32(220.),
-        expr::const_f32(180.),
-        2.,
+        expr::const_f32(MAIN_MENU_EXIT_OUTLINE_Y),
+        expr::const_f32(MAIN_MENU_EXIT_W),
+        expr::const_f32(MAIN_MENU_EXIT_OUTLINE_H),
+        MAIN_MENU_BTN_OUTLINE_T,
         rgba!(0xFF284Eff),
     );
     node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
@@ -653,11 +783,11 @@ pub async fn make(
 
     let node = create_text("about_btn_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, 80.).unwrap();
-    prop.set_default_f32(1, 220.).unwrap();
+    prop.set_default_f32(0, MAIN_MENU_BTN_LABEL_X).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_ABOUT_LABEL_Y).unwrap();
     prop.set_default_f32(2, 1000.).unwrap();
     prop.set_default_f32(3, 1000.).unwrap();
-    node.get_property("font_size").unwrap().set_default_f32(0, 28.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, MAIN_MENU_LABEL_FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "about").unwrap();
     let prop = node.get_property("text_color").unwrap();
     prop.set_default_f32_multi(&rgba!(0x14AEB8ff)).unwrap();
@@ -679,11 +809,11 @@ pub async fn make(
 
     let node = create_text("exit_btn_label");
     let prop = node.get_property("rect").unwrap();
-    prop.set_default_f32(0, 80.).unwrap();
-    prop.set_default_f32(1, 320.).unwrap();
+    prop.set_default_f32(0, MAIN_MENU_BTN_LABEL_X).unwrap();
+    prop.set_default_f32(1, MAIN_MENU_EXIT_LABEL_Y).unwrap();
     prop.set_default_f32(2, 1000.).unwrap();
     prop.set_default_f32(3, 1000.).unwrap();
-    node.get_property("font_size").unwrap().set_default_f32(0, 28.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, MAIN_MENU_LABEL_FONTSIZE).unwrap();
     node.set_property_str(atom, Role::App, "text", "exit app").unwrap();
     let prop = node.get_property("text_color").unwrap();
     prop.set_default_f32_multi(&rgba!(0xFF284Eff)).unwrap();
@@ -702,6 +832,137 @@ pub async fn make(
         .await;
     let theme_label = PropertyStr::wrap(&node, Role::App, "text", 0).unwrap();
     main_menu_layer.link(node);
+
+    // About overlay, opened by the about button: app version and
+    // commit hash in a box centered on the screen, styled like the
+    // main menu. A full-screen capture button hides it on any click.
+    let about_layer = create_layer("about_layer");
+    let prop = about_layer.get_property("rect").unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
+    about_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
+    about_layer.set_property_u32(atom, Role::App, "z_index", 20).unwrap();
+    about_layer.set_property_u32(atom, Role::App, "priority", 20).unwrap();
+    let about_layer = about_layer
+        .setup(|me| Layer::new(me, app.renderer.clone(), app.redraw_trigger.clone()))
+        .await;
+    content.link(about_layer.clone());
+
+    let node = create_button("about_capture_btn");
+    node.set_property_bool(atom, Role::App, "is_active", true).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 0).unwrap();
+    node.set_property_u32(atom, Role::App, "priority", 0).unwrap();
+    let prop = node.get_property("rect").unwrap();
+    prop.set_default_f32(0, 0.).unwrap();
+    prop.set_default_f32(1, 0.).unwrap();
+    prop.set_default_expr(2, expr::load_var("w")).unwrap();
+    prop.set_default_expr(3, expr::load_var("h")).unwrap();
+
+    let sg_root = app.sg_root.clone();
+    let redraw = app.redraw_trigger.clone();
+    let ex = app.ex.clone();
+    let (slot, recvr) = Slot::new("about_capture_clicked");
+    node.register("click", slot).unwrap();
+    let listen_click = ex.spawn(async move {
+        while recvr.recv().await.is_ok() {
+            let atom = &mut redraw.make_guard(gfxtag!("about capture"));
+            let about_layer = sg_root.lookup_node("/window/content/about_layer").unwrap();
+            about_layer.set_property_bool(atom, Role::App, "is_visible", false).unwrap();
+        }
+    });
+    app.tasks.lock().push(listen_click);
+
+    let node =
+        node.setup(|me| Button::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    about_layer.link(node);
+
+    let node = create_vector_art("about_box");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w / 2 - MAIN_MENU_ABOUT_BOX_W / 2").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    let code = cc.compile("h / 2 - MAIN_MENU_ABOUT_BOX_H / 2").unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, MAIN_MENU_ABOUT_BOX_W).unwrap();
+    prop.set_default_f32(3, MAIN_MENU_ABOUT_BOX_H).unwrap();
+    node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 1).unwrap();
+    let mut shape = VectorShape::new();
+    shape.add_filled_box(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::const_f32(MAIN_MENU_ABOUT_BOX_W),
+        expr::const_f32(MAIN_MENU_ABOUT_BOX_H),
+        [0., 0., 0., 0.6],
+    );
+    shape.add_outline(
+        expr::const_f32(0.),
+        expr::const_f32(0.),
+        expr::const_f32(MAIN_MENU_ABOUT_BOX_W),
+        expr::const_f32(MAIN_MENU_ABOUT_BOX_H),
+        MAIN_MENU_BOX_OUTLINE_T,
+        rgba!(0x00F0FFff),
+    );
+    node.set_property_shape(atom, Role::App, "shape", shape).unwrap();
+    let node =
+        node.setup(|me| VectorArt::new(me, app.renderer.clone(), app.redraw_trigger.clone())).await;
+    about_layer.link(node);
+
+    let node = create_text("about_version_label");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w / 2 - MAIN_MENU_ABOUT_BOX_W / 2 + MAIN_MENU_PADDING").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    let code = cc.compile("h / 2 - MAIN_MENU_ABOUT_BOX_H / 2 + MAIN_MENU_ABOUT_BOX_H / 4").unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 1000.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, MAIN_MENU_LABEL_FONTSIZE).unwrap();
+    node.set_property_str(atom, Role::App, "text", env!("CARGO_PKG_VERSION")).unwrap();
+    let prop = node.get_property("text_color").unwrap();
+    prop.set_default_f32_multi(&rgba!(0x77FFBEff)).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+
+    let node = node
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
+        .await;
+    about_layer.link(node);
+
+    let node = create_text("about_commit_label");
+    let prop = node.get_property("rect").unwrap();
+    let code = cc.compile("w / 2 - MAIN_MENU_ABOUT_BOX_W / 2 + MAIN_MENU_PADDING").unwrap();
+    prop.set_default_expr(0, code).unwrap();
+    let code = cc.compile("h / 2 - MAIN_MENU_ABOUT_BOX_H / 2 + MAIN_MENU_ABOUT_BOX_H / 2").unwrap();
+    prop.set_default_expr(1, code).unwrap();
+    prop.set_default_f32(2, 1000.).unwrap();
+    prop.set_default_f32(3, 1000.).unwrap();
+    node.get_property("font_size").unwrap().set_default_f32(0, MAIN_MENU_LABEL_FONTSIZE).unwrap();
+    let commit = option_env!("COMMITISH").unwrap_or("unknown");
+    node.set_property_str(atom, Role::App, "text", commit).unwrap();
+    let prop = node.get_property("text_color").unwrap();
+    prop.set_default_f32_multi(&[1., 1., 1., 1.]).unwrap();
+    node.set_property_u32(atom, Role::App, "z_index", 3).unwrap();
+
+    let node = node
+        .setup(|me| {
+            Text::new(
+                me,
+                window_scale.clone(),
+                app.renderer.clone(),
+                i18n_fish.clone(),
+                app.redraw_trigger.clone(),
+            )
+        })
+        .await;
+    about_layer.link(node);
 
     // The first-run splash and the king video background are theme
     // content, not baseline structure: the scifi theme owns both (see

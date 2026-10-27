@@ -109,12 +109,12 @@ mod android_ui_consts {
 }
 
 #[cfg(target_os = "android")]
-mod ui_consts {
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
 #[cfg(feature = "emulate-android")]
-mod ui_consts {
+pub mod ui_consts {
     pub use super::android_ui_consts::*;
 }
 
@@ -122,7 +122,7 @@ mod ui_consts {
     any(target_os = "linux", target_os = "macos", target_os = "windows"),
     not(feature = "emulate-android")
 ))]
-mod ui_consts {
+pub mod ui_consts {
     pub const LABEL_X: f32 = 20.;
     pub const LABEL_LINESPACE: f32 = 55.;
     pub const LABEL_FONTSIZE: f32 = 22.;
@@ -943,6 +943,10 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "priority", 2).unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
 
+    let theme = app.sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "action_fg_color", &theme, "edit.action_fg_color").unwrap();
+    wire_color(&node, "action_bg_color", &theme, "edit.action_bg_color").unwrap();
+
     node.set_property_str(atom, Role::App, "placeholder_text", "NAME").unwrap();
     let prop = node.get_property("placeholder_color").unwrap();
     prop.set_default_f32_multi(&[
@@ -1055,6 +1059,10 @@ pub async fn make(
     node.set_property_u32(atom, Role::App, "z_index", 6).unwrap();
     node.set_property_u32(atom, Role::App, "priority", 3).unwrap();
     //node.set_property_bool(atom, Role::App, "debug", true).unwrap();
+
+    let theme = app.sg_root.lookup_node("/theme").unwrap();
+    wire_color(&node, "action_fg_color", &theme, "edit.action_fg_color").unwrap();
+    wire_color(&node, "action_bg_color", &theme, "edit.action_bg_color").unwrap();
 
     node.set_property_str(atom, Role::App, "placeholder_text", "KEY").unwrap();
     let prop = node.get_property("placeholder_color").unwrap();
@@ -1333,6 +1341,7 @@ pub async fn make(
         btns_bg,
         btns_bg_grey,
         "addcontact_valid",
+        false,
     );
 
     // Create cancel/done edit buttons at bottom of screen
