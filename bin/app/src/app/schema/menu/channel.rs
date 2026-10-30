@@ -17,7 +17,7 @@
  */
 
 use bs58;
-use darkfi_serial::{async_trait, deserialize, Encodable, SerialDecodable, SerialEncodable};
+use darkfi_serial::{async_trait, deserialize, SerialDecodable, SerialEncodable};
 use kvdb_overlay::Database as KvDb;
 use rand::{rngs::OsRng, Rng};
 use ui_consts::*;
@@ -34,9 +34,7 @@ pub struct Channel {
 }
 
 use super::{
-    super::{append_joined_channel, chat},
-    edit_buttons,
-    edit_switch::edit_switch,
+    super::chat, edit_buttons, edit_switch::edit_switch, join_and_open_chat,
     setup_add_button_validity, valid_key, BTN_TEXT_Y, CHANNEL_ITEM_HEIGHT, MENU_BTN_W_L,
 };
 use crate::{
@@ -56,8 +54,8 @@ use crate::{
     shape,
     theme::wire_color,
     ui::{
-        emoji_picker::EmojiMeshesPtr, BaseEdit, BaseEditType, Button, Layer, Menu, RedrawTrigger,
-        ShapeVertex, Shortcut, Text, UIObject, VectorArt, VectorShape, Window,
+        emoji_picker::EmojiMeshesPtr, BaseEdit, BaseEditType, Button, Layer, Menu, ShapeVertex,
+        Shortcut, Text, UIObject, VectorArt, VectorShape, Window,
     },
     util::i18n::I18nBabelFish,
 };
@@ -163,43 +161,6 @@ async fn unfocus_editors(content: &SceneNodePtr) {
     for name in ["nick_edit", "secret_edit"] {
         let node = content.lookup_node(format!("/content_area/{name}")).unwrap();
         node.call_method("unfocus", vec![]).await.unwrap();
-    }
-}
-
-/// Join `channel` if needed and retarget the one chat screen onto it.
-async fn join_and_open_channel(
-    sg_root: &SceneNodePtr,
-    channel: &str,
-    channel_vis: &PropertyBool,
-    redraw: &RedrawTrigger,
-) {
-    let atom = &mut redraw.make_guard(gfxtag!("join_channel"));
-
-    // One chat screen: an unknown channel is newly joined before
-    // retargeting the chatview.
-    let main_menu = sg_root.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
-    let items_prop = main_menu.get_property("items").unwrap();
-    let is_new = !items_prop.contains_str(channel);
-    if is_new {
-        items_prop.push_str(atom, Role::App, channel).unwrap();
-        append_joined_channel(channel);
-    }
-
-    let node = sg_root.lookup_node("/window/content/chat/main_chat_layer").unwrap();
-    node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
-    channel_vis.set(atom, false);
-    let chatty = node.lookup_node("/content/chatty").unwrap();
-    let mut chan_data = vec![];
-    channel.to_string().encode(&mut chan_data).unwrap();
-    let _ = chatty.call_method("set_channel", chan_data).await;
-
-    if is_new {
-        // Trigger rescan for this channel
-        if let Some(darkirc) = sg_root.lookup_node("/plugin/darkirc") {
-            let mut data = vec![];
-            channel.to_string().encode(&mut data).unwrap();
-            darkirc.call_method("rescan", data).await.unwrap();
-        }
     }
 }
 
@@ -1373,7 +1334,7 @@ pub async fn make(
             secedit2.call_method("unfocus", vec![]).await.unwrap();
 
             // Jump straight into the freshly added channel
-            join_and_open_channel(&sg_root2, &channel_name, &channel_vis2, &redraw2).await;
+            join_and_open_chat(&sg_root2, &channel_name, &channel_vis2, &redraw2).await;
         }
     });
 
@@ -1397,7 +1358,7 @@ pub async fn make(
         while let Ok(data) = recvr.recv().await {
             let channel: String = deserialize(&data).unwrap();
             i!("Selected channel: {channel}");
-            join_and_open_channel(&sg_root, &channel, &channel_vis, &redraw2).await;
+            join_and_open_chat(&sg_root, &channel, &channel_vis, &redraw2).await;
         }
     });
 
