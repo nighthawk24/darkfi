@@ -49,34 +49,21 @@ impl TestHarness {
         let mut data = vec![DeployFunction::LockV1 as u8];
         debris.params.encode(&mut data)?;
         let call = ContractCall { contract_id: *DEPLOYOOOR_CONTRACT_ID, data };
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: vec![] }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, vec![], vec![deploy_keypair.secret]),
+            vec![],
+        )?;
 
         // If we have tx fees enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let sigs = tx.create_sigs(&[deploy_keypair.secret])?;
-            tx.signatures = vec![sigs];
-
-            let (fee_call, fee_proofs, fee_secrets, _spent_fee_coins, fee_call_params) =
-                self.append_fee_call(holder, tx, block_height, &[]).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, _spent_fee_coins, fee_call_params) =
+                self.append_fee_call(holder, &mut tx_builder, block_height).await?;
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[deploy_keypair.secret])?;
-        tx.signatures = vec![sigs];
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, debris.params, fee_params))
     }

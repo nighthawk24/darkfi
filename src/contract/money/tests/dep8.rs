@@ -157,12 +157,12 @@ fn dep8() -> Result<()> {
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing the Transfer call.
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: secrets.proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, secrets.proofs, secrets.signature_secrets),
+            vec![],
+        )?;
 
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&secrets.signature_secrets)?;
-        tx.signatures = vec![sigs];
+        let tx = tx_builder.build_signed()?;
 
         // First we verify the fee-less transaction to see how much gas it
         // uses for execution and verification.
@@ -248,7 +248,7 @@ fn dep8() -> Result<()> {
                 merkle_root: public_inputs.merkle_root,
                 user_data_enc: public_inputs.input_user_data_enc,
                 signature_public: public_inputs.signature_public,
-                // Here we mark the Input tx-local since the Ouput it
+                // Here we mark the Input tx-local since the Output it
                 // comes from (the previous Transfer call) creates it.
                 tx_local: true,
             },
@@ -272,15 +272,12 @@ fn dep8() -> Result<()> {
         let fee_call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
 
         // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: vec![proof] }, vec![])?;
+        tx_builder
+            .append(ContractCallLeaf::new(fee_call, vec![proof], vec![signature_secret]), vec![])?;
         let alice_fee_params = Some(fee_call_params);
 
         // Now build the actual transaction and sign it with all necessary keys
-        let mut alice_tx = tx_builder.build()?;
-        let sigs = alice_tx.create_sigs(&secrets.signature_secrets)?;
-        alice_tx.signatures = vec![sigs];
-        let sigs = alice_tx.create_sigs(&[signature_secret])?;
-        alice_tx.signatures.push(sigs);
+        let alice_tx = tx_builder.build_signed()?;
 
         th.execute_transfer_tx(
             &Alice,

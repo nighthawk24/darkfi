@@ -66,11 +66,11 @@ impl TestHarness {
         let mut data = vec![MoneyFunction::GenesisMintV1 as u8];
         debris.params.encode(&mut data)?;
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: debris.proofs }, vec![])?;
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[wallet.keypair.secret])?;
-        tx.signatures = vec![sigs];
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, debris.proofs, vec![wallet.keypair.secret]),
+            vec![],
+        )?;
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, debris.params))
     }

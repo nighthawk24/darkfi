@@ -30,6 +30,7 @@
 
 use std::hash::{Hash, Hasher};
 
+use darkfi::Result;
 use darkfi_sdk::{
     bridgetree,
     crypto::{
@@ -37,10 +38,14 @@ use darkfi_sdk::{
         poseidon_hash, BaseBlind, Blind, FuncId, ScalarBlind, SecretKey,
     },
     pasta::pallas,
+    ContractCall,
 };
-use darkfi_serial::{async_trait, SerialDecodable, SerialEncodable};
+use darkfi_serial::{async_trait, deserialize_async, SerialDecodable, SerialEncodable};
 
-use crate::model::{Coin, Nullifier, TokenId};
+use crate::{
+    model::{Coin, MoneyBurnParamsV1, MoneyFeeParamsV1, MoneyTransferParamsV1, Nullifier, TokenId},
+    MoneyFunction,
+};
 
 /// `Money::FeeV1` API
 pub mod fee_v1;
@@ -140,4 +145,30 @@ pub fn compute_remainder_blind(
     }
 
     Blind(total)
+}
+
+/// Auxiliary function to grab all the nullifiers from a transaction money call.
+pub async fn money_call_nullifiers(call: &ContractCall) -> Result<Vec<Nullifier>> {
+    let mut nullifiers: Vec<Nullifier> = vec![];
+    let data = &call.data;
+    match MoneyFunction::try_from(data[0])? {
+        MoneyFunction::FeeV1 => {
+            let params: MoneyFeeParamsV1 = deserialize_async(&data[9..]).await?;
+            nullifiers.push(params.input.nullifier);
+        }
+        MoneyFunction::TransferV1 => {
+            let params: MoneyTransferParamsV1 = deserialize_async(&data[1..]).await?;
+            for input in params.inputs {
+                nullifiers.push(input.nullifier);
+            }
+        }
+        MoneyFunction::BurnV1 => {
+            let params: MoneyBurnParamsV1 = deserialize_async(&data[1..]).await?;
+            for input in params.inputs {
+                nullifiers.push(input.nullifier);
+            }
+        }
+        _ => { /* Do nothing */ }
+    }
+    Ok(nullifiers)
 }

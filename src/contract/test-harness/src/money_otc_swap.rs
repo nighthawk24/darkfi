@@ -16,8 +16,6 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::slice;
-
 use darkfi::{
     tx::{ContractCallLeaf, Transaction, TransactionBuilder},
     zk::halo2::Field,
@@ -132,42 +130,24 @@ impl TestHarness {
         let mut data = vec![MoneyFunction::TransferV1 as u8];
         swap_full_params.encode(&mut data)?;
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: swap_full_proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, swap_full_proofs, vec![debris1.signature_secret]),
+            vec![],
+        )?;
 
         // If we have tx fees enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let sigs = tx.create_sigs(&[debris1.signature_secret])?;
-            tx.signatures = vec![sigs];
-
-            // First holder gets the partially signed transaction and adds their signature
-            let sigs = tx.create_sigs(&[debris0.signature_secret])?;
-            tx.signatures[0].insert(0, sigs[0]);
-
-            let (fee_call, fee_proofs, fee_secrets, _spent_fee_coins, fee_call_params) =
-                self.append_fee_call(holder0, tx, block_height, slice::from_ref(owncoin0)).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, _spent_fee_coins, fee_call_params) =
+                self.append_fee_call(holder0, &mut tx_builder, block_height).await?;
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[debris1.signature_secret])?;
-        tx.signatures = vec![sigs];
+        let mut tx = tx_builder.build_signed()?;
         // First holder gets the partially signed transaction and adds their signature
         let sigs = tx.create_sigs(&[debris0.signature_secret])?;
         tx.signatures[0].insert(0, sigs[0]);
-
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
 
         Ok((tx, swap_full_params, fee_params))
     }

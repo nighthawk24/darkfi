@@ -32,8 +32,7 @@ use darkfi_money_contract::{
     },
     model::{CoinAttributes, TokenAttributes, TokenId},
     MoneyFunction, MONEY_CONTRACT_ZKAS_AUTH_TOKEN_FREEZE_NS_V1,
-    MONEY_CONTRACT_ZKAS_AUTH_TOKEN_MINT_NS_V1, MONEY_CONTRACT_ZKAS_FEE_NS_V1,
-    MONEY_CONTRACT_ZKAS_TOKEN_MINT_NS_V1,
+    MONEY_CONTRACT_ZKAS_AUTH_TOKEN_MINT_NS_V1, MONEY_CONTRACT_ZKAS_TOKEN_MINT_NS_V1,
 };
 use darkfi_sdk::{
     crypto::{
@@ -302,24 +301,16 @@ impl Drk {
             return Err(Error::Custom("Auth token mint circuit not found".to_string()))
         };
 
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("Fee circuit not found".to_string()))
-        };
-
         let mint_zkbin = ZkBinary::decode(&mint_zkbin.1, false)?;
         let auth_mint_zkbin = ZkBinary::decode(&auth_mint_zkbin.1, false)?;
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
 
         let mint_circuit = ZkCircuit::new(empty_witnesses(&mint_zkbin)?, &mint_zkbin);
         let auth_mint_circuit =
             ZkCircuit::new(empty_witnesses(&auth_mint_zkbin)?, &auth_mint_zkbin);
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
 
         // Creating TokenMint, AuthTokenMint and Fee circuits proving keys
         let mint_pk = ProvingKey::build(mint_zkbin.k, &mint_circuit);
         let auth_mint_pk = ProvingKey::build(auth_mint_zkbin.k, &auth_mint_circuit);
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
 
         // Build the coin attributes
         let coin_attrs = CoinAttributes {
@@ -353,39 +344,20 @@ impl Drk {
 
         // Create the TransactionBuilder containing above calls
         let mut tx_builder = TransactionBuilder::new(
-            ContractCallLeaf { call: mint_call, proofs: mint_debris.proofs },
+            ContractCallLeaf::new(mint_call, mint_debris.proofs, vec![]),
             vec![DarkTree::new(
-                ContractCallLeaf { call: auth_call, proofs: auth_debris.proofs },
+                ContractCallLeaf::new(auth_call, auth_debris.proofs, vec![mint_authority.secret]),
                 vec![],
                 None,
                 None,
             )],
         )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let auth_sigs = tx.create_sigs(&[mint_authority.secret])?;
-        let mint_sigs = tx.create_sigs(&[])?;
-        tx.signatures = vec![auth_sigs, mint_sigs];
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[mint_authority.secret])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&[])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Create a token freeze transaction. Returns the transaction object on success.
@@ -410,21 +382,13 @@ impl Drk {
             return Err(Error::Custom("Auth token freeze circuit not found".to_string()))
         };
 
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("Fee circuit not found".to_string()))
-        };
-
         let auth_freeze_zkbin = ZkBinary::decode(&auth_freeze_zkbin.1, false)?;
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
 
         let auth_freeze_circuit =
             ZkCircuit::new(empty_witnesses(&auth_freeze_zkbin)?, &auth_freeze_zkbin);
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
 
         // Creating AuthTokenFreeze and Fee circuits proving keys
         let auth_freeze_pk = ProvingKey::build(auth_freeze_zkbin.k, &auth_freeze_circuit);
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
 
         // Create the freeze call
         let builder = AuthTokenFreezeCallBuilder {
@@ -440,30 +404,14 @@ impl Drk {
 
         // Create the TransactionBuilder containing above call
         let mut tx_builder = TransactionBuilder::new(
-            ContractCallLeaf { call: freeze_call, proofs: freeze_debris.proofs },
+            ContractCallLeaf::new(freeze_call, freeze_debris.proofs, vec![mint_authority.secret]),
             vec![],
         )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[mint_authority.secret])?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[mint_authority.secret])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 }

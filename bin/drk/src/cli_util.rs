@@ -45,7 +45,7 @@ use darkfi_sdk::{
     crypto::{
         keypair::{Address, Network},
         pasta_prelude::PrimeField,
-        FuncId, SecretKey,
+        FuncId,
     },
     dark_tree::DarkTree,
     pasta::pallas,
@@ -872,10 +872,11 @@ pub fn display_mining_config(
 
 /// Cast `ContractCallImport` to `ContractCallLeaf`
 fn to_leaf(call: &ContractCallImport) -> ContractCallLeaf {
-    ContractCallLeaf {
-        call: call.call().clone(),
-        proofs: call.proofs().iter().map(|p| Proof::new(p.clone())).collect(),
-    }
+    ContractCallLeaf::new(
+        call.call().clone(),
+        call.proofs().iter().map(|p| Proof::new(p.clone())).collect(),
+        call.secrets().to_vec(),
+    )
 }
 
 /// Recursively build subtree for a DarkTree
@@ -892,27 +893,11 @@ fn build_subtree(
     DarkTree::new(to_leaf(&calls[idx]), children, None, None)
 }
 
-/// Recursively retrieve the signature keys in Post order traversal
-fn retrieve_signature_keys(
-    idx: usize,
-    calls: &[ContractCallImport],
-    children_map: &HashMap<usize, &Vec<usize>>,
-    sig_keys: &mut Vec<Vec<SecretKey>>,
-) {
-    let children_idx = children_map.get(&idx).map(|v| v.as_slice()).unwrap_or(&[]);
-
-    for i in children_idx {
-        retrieve_signature_keys(*i, calls, children_map, sig_keys)
-    }
-
-    sig_keys.push(calls[idx].secrets().to_vec());
-}
-
 /// Build a `Transaction` given a slice of calls and their mapping
 pub fn tx_from_calls_mapped(
     calls: &[ContractCallImport],
     map: &[(usize, Vec<usize>)],
-) -> Result<(TransactionBuilder, Vec<Vec<SecretKey>>)> {
+) -> Result<TransactionBuilder> {
     assert_eq!(calls.len(), map.len());
 
     let children_map: HashMap<usize, &Vec<usize>> = map.iter().map(|(k, v)| (*k, v)).collect();
@@ -935,12 +920,7 @@ pub fn tx_from_calls_mapped(
         tx_builder.append(to_leaf(&calls[*root_idx]), root_children)?;
     }
 
-    let mut signature_secrets: Vec<Vec<SecretKey>> = vec![];
-    for idx in root_idxs {
-        retrieve_signature_keys(idx, calls, &children_map, &mut signature_secrets);
-    }
-
-    Ok((tx_builder, signature_secrets))
+    Ok(tx_builder)
 }
 
 /// Auxiliary function to parse a contract call mapping.
@@ -1040,7 +1020,7 @@ fn check_cycles(entries: &[(usize, Vec<usize>)]) -> std::result::Result<(), Stri
 mod tests {
     use super::*;
     use darkfi_sdk::{
-        crypto::{pasta_prelude::Field, ContractId},
+        crypto::{pasta_prelude::Field, ContractId, SecretKey},
         ContractCall,
     };
     use rand::rngs::OsRng;
@@ -1131,11 +1111,12 @@ mod tests {
         );
 
         // Transaction with 3 root calls, each with no children
-        let (mut tx_builder, sig_keys) = tx_from_calls_mapped(
+        let mut tx_builder = tx_from_calls_mapped(
             &[call0.clone(), call1.clone(), call2.clone()],
             &parse_tree("{0 : [], 1: [], 2: []}").unwrap(),
         )
         .unwrap();
+        let sig_keys = tx_builder.get_secrets().unwrap();
         let leafs = tx_builder.calls.build_vec().unwrap();
 
         assert_eq!(leafs.len(), 3);
@@ -1148,11 +1129,12 @@ mod tests {
         assert_eq!(sig_keys[2].len(), 1);
 
         // Transaction with 2 root calls, the second call is child of the first
-        let (mut tx_builder, sig_keys) = tx_from_calls_mapped(
+        let mut tx_builder = tx_from_calls_mapped(
             &[call0.clone(), call1.clone(), call2.clone()],
             &parse_tree("{0 : [1], 1: [], 2: []}").unwrap(),
         )
         .unwrap();
+        let sig_keys = tx_builder.get_secrets().unwrap();
         let leafs = tx_builder.calls.build_vec().unwrap();
 
         assert_eq!(leafs.len(), 3);
@@ -1165,11 +1147,12 @@ mod tests {
         assert_eq!(sig_keys[2].len(), 1);
 
         // Transaction with 1 root call, the second and third are the children of the first
-        let (mut tx_builder, sig_keys) = tx_from_calls_mapped(
+        let mut tx_builder = tx_from_calls_mapped(
             &[call0.clone(), call1.clone(), call2.clone()],
             &parse_tree("{0 : [1, 2], 1: [], 2: []}").unwrap(),
         )
         .unwrap();
+        let sig_keys = tx_builder.get_secrets().unwrap();
         let leafs = tx_builder.calls.build_vec().unwrap();
 
         assert_eq!(leafs.len(), 3);
@@ -1183,11 +1166,12 @@ mod tests {
 
         // Transaction with 1 root call, the first is the child of the second, the second is the
         // child of the third
-        let (mut tx_builder, sig_keys) = tx_from_calls_mapped(
+        let mut tx_builder = tx_from_calls_mapped(
             &[call0, call1, call2],
             &parse_tree("{0 : [], 1: [0], 2: [1]}").unwrap(),
         )
         .unwrap();
+        let sig_keys = tx_builder.get_secrets().unwrap();
         let leafs = tx_builder.calls.build_vec().unwrap();
 
         assert_eq!(leafs.len(), 3);

@@ -84,6 +84,16 @@ impl<T: Clone + Send + Sync> DarkTreeLeaf<T> {
     fn set_children_indexes(&mut self, children_indexes: Vec<usize>) {
         self.info.children_indexes = children_indexes;
     }
+
+    /// Get immutable access to the leaf's data
+    pub fn data(&self) -> &T {
+        &self.info.data
+    }
+
+    /// Get mutable access to the leaf's data
+    pub fn data_mut(&mut self) -> &mut T {
+        &mut self.info.data
+    }
 }
 
 /// This struct represents a DFS post-order traversal Tree.
@@ -709,6 +719,12 @@ impl<T: Clone + Send + Sync> DarkForest<T> {
             len += tree.iter().count()
         }
         len
+    }
+
+    /// Return a mutable iterator over all leaves in the forest,
+    /// using DFS post-order traversal on each tree.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut DarkTreeLeaf<T>> {
+        self.trees.iter_mut().flat_map(|tree| tree.iter_mut())
     }
 
     /// Check if configured min capacity have not been exceeded.

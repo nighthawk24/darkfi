@@ -234,11 +234,11 @@ impl Harness {
         let mut data = vec![MoneyFunction::PoWRewardV1 as u8];
         debris.params.encode(&mut data)?;
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: debris.proofs }, vec![])?;
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[keypair.secret])?;
-        tx.signatures = vec![sigs];
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, debris.proofs, vec![keypair.secret]),
+            vec![],
+        )?;
+        let tx = tx_builder.build_signed()?;
 
         // We increment timestamp so we don't have to use sleep
         let timestamp = previous.header.timestamp.checked_add(1.into())?;

@@ -261,14 +261,22 @@ pub const MIN_TX_CALLS: usize = 1;
 // TODO: verify max value
 pub const MAX_TX_CALLS: usize = 20;
 
-/// Auxiliarry structure containing all the information
-/// required to execute a contract call.
+/// Auxiliarry structure containing all the information required to execute a
+/// contract call and generate and sign a valid transaction.
 #[derive(Clone)]
 pub struct ContractCallLeaf {
     /// Call executed
     pub call: ContractCall,
     /// Attached ZK proofs
     pub proofs: Vec<Proof>,
+    /// Secret keys
+    pub secrets: Vec<SecretKey>,
+}
+
+impl ContractCallLeaf {
+    pub fn new(call: ContractCall, proofs: Vec<Proof>, secrets: Vec<SecretKey>) -> Self {
+        Self { call, proofs, secrets }
+    }
 }
 
 /// Auxiliary structure to build a full [`Transaction`] using
@@ -326,5 +334,65 @@ impl TransactionBuilder {
         }
 
         Ok(Transaction { calls, proofs, signatures: vec![] })
+    }
+
+    /// Builds the [`Transaction`] and create signatures from secrets.
+    pub fn build_signed(&mut self) -> Result<Transaction> {
+        // Build the leafs vector
+        let leafs = self.calls.build_vec()?;
+
+        // Double check integrity
+        dark_forest_leaf_vec_integrity_check(&leafs, Some(MIN_TX_CALLS), Some(MAX_TX_CALLS))?;
+
+        // Build the corresponding transaction
+        let mut calls = Vec::with_capacity(leafs.len());
+        let mut proofs = Vec::with_capacity(leafs.len());
+        let mut secrets = Vec::with_capacity(leafs.len());
+        for leaf in leafs {
+            let call = DarkLeaf {
+                data: leaf.data.call,
+                parent_index: leaf.parent_index,
+                children_indexes: leaf.children_indexes,
+            };
+            calls.push(call);
+            proofs.push(leaf.data.proofs);
+            secrets.push(leaf.data.secrets);
+        }
+
+        let mut tx = Transaction { calls, proofs, signatures: vec![] };
+
+        // Generate signatures
+        for secret_keys in secrets {
+            let sigs = tx.create_sigs(&secret_keys)?;
+            tx.signatures.push(sigs);
+        }
+
+        Ok(tx)
+    }
+
+    /// Extract all secrets from leaves.
+    ///
+    /// Returns a Vec of Vec<SecretKey> where each inner Vec os a leaf in DFS
+    /// post-order traversal order.
+    pub fn get_secrets(&mut self) -> Result<Vec<Vec<SecretKey>>> {
+        let leafs = self.calls.build_vec().map_err(|e| Error::Custom(e.to_string()))?;
+        Ok(leafs.iter().map(|leaf| leaf.data.secrets.clone()).collect())
+    }
+}
+
+/// Trait for types that can iterate over mutable contract calls
+pub trait ContractCallIter {
+    fn call_iter_mut(&mut self) -> impl Iterator<Item = &mut ContractCall>;
+}
+
+impl ContractCallIter for TransactionBuilder {
+    fn call_iter_mut(&mut self) -> impl Iterator<Item = &mut ContractCall> {
+        self.calls.iter_mut().map(|leaf| &mut leaf.data_mut().call)
+    }
+}
+
+impl ContractCallIter for Transaction {
+    fn call_iter_mut(&mut self) -> impl Iterator<Item = &mut ContractCall> {
+        self.calls.iter_mut().map(|leaf| &mut leaf.data)
     }
 }

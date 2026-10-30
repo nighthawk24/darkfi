@@ -16,18 +16,18 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::{collections::HashSet, hash::RandomState};
+use std::slice;
 
 use darkfi::{
     tx::{ContractCallLeaf, Transaction, TransactionBuilder},
-    zk::{halo2::Field, Proof},
-    Result,
+    zk::halo2::Field,
+    Error, Result,
 };
 use darkfi_money_contract::{
     client::{
         compute_remainder_blind,
         fee_v1::{create_fee_proof, FeeCallInput, FeeCallOutput, FEE_CALL_GAS},
-        MoneyNote, OwnCoin,
+        money_call_nullifiers, MoneyNote, OwnCoin,
     },
     model::{token_id::DARK_TOKEN_ID, Input, MoneyFeeParamsV1, Output},
     MoneyFunction, MONEY_CONTRACT_ZKAS_FEE_NS_V1,
@@ -148,11 +148,11 @@ impl TestHarness {
         required_fee.encode(&mut data)?;
         params.encode(&mut data)?;
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: vec![proof] }, vec![])?;
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[signature_secret])?;
-        tx.signatures = vec![sigs];
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, vec![proof], vec![signature_secret]),
+            vec![],
+        )?;
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, params))
     }
@@ -172,26 +172,24 @@ impl TestHarness {
         Ok(wallet.process_fee(&Some(params.clone()), holder))
     }
 
-    /// Create and append a `Money::Fee` call to a given [`Transaction`] for
-    /// a given [`Holder`].
+    /// Updates a [`TransactionBuilder`] with fee payment for a given [`Holder`].
     ///
-    /// Additionally takes a set of spent coins in order not to reuse them here.
-    ///
-    /// Returns the `Fee` call, and all necessary data and parameters related.
+    /// Returns the call, spent coins, and fee params.
     pub async fn append_fee_call(
         &mut self,
         holder: &Holder,
-        tx: Transaction,
+        tx_builder: &mut TransactionBuilder,
         block_height: u32,
-        spent_coins: &[OwnCoin],
-    ) -> Result<(ContractCall, Vec<Proof>, Vec<SecretKey>, Vec<OwnCoin>, MoneyFeeParamsV1)> {
+    ) -> Result<(ContractCall, Vec<OwnCoin>, MoneyFeeParamsV1)> {
         // First we verify the fee-less transaction to see how much gas it
         // uses for execution and verification.
         let wallet = self.wallet(holder);
         let validator = wallet.validator.read().await;
+        let tx = tx_builder.build_signed()?;
+
         let gas_used = validator
             .add_test_transactions(
-                &[tx],
+                slice::from_ref(&tx),
                 block_height,
                 validator.consensus.module.target,
                 false,
@@ -203,22 +201,35 @@ impl TestHarness {
         // Compute the required fee
         let required_fee = compute_fee(&(gas_used + FEE_CALL_GAS));
 
-        // Knowing the total gas, we can now find an OwnCoin of enough
-        // value so that we can create a valid Money::Fee call.
-        let spent_coins: HashSet<&OwnCoin, RandomState> = HashSet::from_iter(spent_coins);
-        let mut available_coins = wallet.unspent_money_coins.clone();
-        available_coins
-            .retain(|x| x.note.token_id == *DARK_TOKEN_ID && x.note.value > required_fee);
-        available_coins.retain(|x| !spent_coins.contains(x));
-        assert!(!available_coins.is_empty());
+        // Collect spent nullifiers from money calls
+        let mut spent_nullifiers = vec![];
+        for call in &tx.calls {
+            if call.data.contract_id == *MONEY_CONTRACT_ID {
+                if let Ok(nullifiers) = money_call_nullifiers(&call.data).await {
+                    spent_nullifiers.extend(nullifiers);
+                }
+            }
+        }
 
-        let coin = &available_coins[0];
+        // Find a suitable coin from wallet
+        let mut coins = wallet.unspent_money_coins.clone();
+        coins.retain(|x| {
+            x.note.token_id == *DARK_TOKEN_ID &&
+                x.note.value > required_fee &&
+                !spent_nullifiers.contains(&x.nullifier())
+        });
+        if coins.is_empty() {
+            return Err(Error::Custom("Not enough native tokens".to_string()));
+        }
+        let coin = &coins[0];
+        let merkle_tree = &wallet.money_merkle_tree;
+
         let change_value = coin.note.value - required_fee;
 
         // Input and output setup
         let input = FeeCallInput {
             coin: coin.clone(),
-            merkle_path: wallet.money_merkle_tree.witness(coin.leaf_position, 0).unwrap(),
+            merkle_path: merkle_tree.witness(coin.leaf_position, 0).unwrap(),
             user_data_blind: BaseBlind::random(&mut OsRng),
         };
 
@@ -298,6 +309,12 @@ impl TestHarness {
         params.encode(&mut data)?;
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
 
-        Ok((call, vec![proof], vec![signature_secret], vec![coin.clone()], params))
+        // Append the fee call to the transaction builder
+        tx_builder.append(
+            ContractCallLeaf::new(call.clone(), vec![proof], vec![signature_secret]),
+            vec![],
+        )?;
+
+        Ok((call, vec![coin.clone()], params))
     }
 }

@@ -275,13 +275,11 @@ impl Drk {
         let mut data = vec![MoneyFunction::TransferV1 as u8];
         full_params.encode_async(&mut data).await?;
         let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
-        let mut tx_builder =
-            TransactionBuilder::new(ContractCallLeaf { call, proofs: full_proofs }, vec![])?;
-        let mut tx = tx_builder.build()?;
-
-        // Sign the transaction and return it
-        let sigs = tx.create_sigs(&[debris.signature_secret])?;
-        tx.signatures = vec![sigs];
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, full_proofs, vec![debris.signature_secret]),
+            vec![],
+        )?;
+        let tx = tx_builder.build_signed()?;
 
         Ok(tx)
     }

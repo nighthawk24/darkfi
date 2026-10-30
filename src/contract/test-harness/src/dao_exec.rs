@@ -200,16 +200,20 @@ impl TestHarness {
         //
 
         let mut tx_builder = TransactionBuilder::new(
-            ContractCallLeaf { call: exec_call, proofs: exec_proofs },
+            ContractCallLeaf::new(exec_call, exec_proofs, vec![exec_signature_secret]),
             vec![
                 DarkTree::new(
-                    ContractCallLeaf { call: auth_xfer_call, proofs: auth_xfer_proofs },
+                    ContractCallLeaf::new(auth_xfer_call, auth_xfer_proofs, vec![]),
                     vec![],
                     None,
                     None,
                 ),
                 DarkTree::new(
-                    ContractCallLeaf { call: xfer_call, proofs: xfer_secrets.proofs },
+                    ContractCallLeaf::new(
+                        xfer_call,
+                        xfer_secrets.proofs,
+                        xfer_secrets.signature_secrets,
+                    ),
                     vec![],
                     None,
                     None,
@@ -219,34 +223,14 @@ impl TestHarness {
 
         // If fees are enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let auth_xfer_sigs = vec![];
-            let xfer_sigs = tx.create_sigs(&xfer_secrets.signature_secrets)?;
-            let exec_sigs = tx.create_sigs(&[exec_signature_secret])?;
-            tx.signatures = vec![auth_xfer_sigs, xfer_sigs, exec_sigs];
-
-            let (fee_call, fee_proofs, fee_secrets, _spent_fee_coins, fee_call_params) =
-                self.append_fee_call(holder, tx, block_height, &[]).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, _spent_fee_coins, fee_call_params) =
+                self.append_fee_call(holder, &mut tx_builder, block_height).await?;
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with necessary keys.
-        let mut tx = tx_builder.build()?;
-        let auth_xfer_sigs = vec![];
-        let xfer_sigs = tx.create_sigs(&xfer_secrets.signature_secrets)?;
-        let exec_sigs = tx.create_sigs(&[exec_signature_secret])?;
-        tx.signatures = vec![auth_xfer_sigs, xfer_sigs, exec_sigs];
-
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, xfer_params, fee_params))
     }
@@ -301,36 +285,20 @@ impl TestHarness {
 
         // Create the TransactionBuilder containing the `DAO::Exec` call
         let mut tx_builder = TransactionBuilder::new(
-            ContractCallLeaf { call: exec_call, proofs: exec_proofs },
+            ContractCallLeaf::new(exec_call, exec_proofs, vec![exec_signature_secret]),
             vec![],
         )?;
 
         // If fees are enabled, make an offering
         let mut fee_params = None;
-        let mut fee_signature_secrets = None;
         if self.verify_fees {
-            let mut tx = tx_builder.build()?;
-            let exec_sigs = tx.create_sigs(&[exec_signature_secret])?;
-            tx.signatures = vec![exec_sigs];
-
-            let (fee_call, fee_proofs, fee_secrets, _spent_fee_coins, fee_call_params) =
-                self.append_fee_call(holder, tx, block_height, &[]).await?;
-
-            // Append the fee call to the transaction
-            tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-            fee_signature_secrets = Some(fee_secrets);
+            let (_fee_call, _spent_fee_coins, fee_call_params) =
+                self.append_fee_call(holder, &mut tx_builder, block_height).await?;
             fee_params = Some(fee_call_params);
         }
 
         // Now build the actual transaction and sign it with necessary keys.
-        let mut tx = tx_builder.build()?;
-        let exec_sigs = tx.create_sigs(&[exec_signature_secret])?;
-        tx.signatures = vec![exec_sigs];
-
-        if let Some(fee_signature_secrets) = fee_signature_secrets {
-            let sigs = tx.create_sigs(&fee_signature_secrets)?;
-            tx.signatures.push(sigs);
-        }
+        let tx = tx_builder.build_signed()?;
 
         Ok((tx, fee_params))
     }

@@ -301,12 +301,10 @@ fn main() -> Result<()> {
                 debris.params.encode_async(&mut data).await?;
                 let call = ContractCall { contract_id: *MONEY_CONTRACT_ID, data };
                 let mut tx_builder = TransactionBuilder::new(
-                    ContractCallLeaf { call, proofs: debris.proofs },
+                    ContractCallLeaf::new(call, debris.proofs, vec![signature_secret]),
                     vec![],
                 )?;
-                let mut tx = tx_builder.build()?;
-                let sigs = tx.create_sigs(&[signature_secret])?;
-                tx.signatures = vec![sigs];
+                let tx = tx_builder.build_signed()?;
 
                 println!("{}", base64::encode(&serialize_async(&tx).await));
             }

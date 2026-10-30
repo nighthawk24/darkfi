@@ -51,8 +51,7 @@ use darkfi_dao_contract::{
 use darkfi_money_contract::{
     client::transfer_v1::{select_coins, TransferCallBuilder, TransferCallInput},
     model::{CoinAttributes, Nullifier, TokenId},
-    MoneyFunction, MONEY_CONTRACT_ZKAS_BURN_NS_V1, MONEY_CONTRACT_ZKAS_FEE_NS_V1,
-    MONEY_CONTRACT_ZKAS_MINT_NS_V1,
+    MoneyFunction, MONEY_CONTRACT_ZKAS_BURN_NS_V1, MONEY_CONTRACT_ZKAS_MINT_NS_V1,
 };
 use darkfi_sdk::{
     bridgetree,
@@ -2144,22 +2143,7 @@ impl Drk {
 
         // Now we need to do a lookup for the zkas proof bincodes, and create
         // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC. First we grab the fee call from money.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("Fee circuit not found".to_string()))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuit proving key
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
-        // Now we grab the DAO mint
+        // We also do this through the RPC. First we grab the DAO mint.
         let zkas_bins = self.lookup_zkas(&DAO_CONTRACT_ID).await?;
 
         let Some(dao_mint_zkbin) = zkas_bins.iter().find(|x| x.0 == DAO_CONTRACT_ZKAS_MINT_NS)
@@ -2192,29 +2176,16 @@ impl Drk {
         let call = ContractCall { contract_id: *DAO_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing above call
-        let mut tx_builder = TransactionBuilder::new(ContractCallLeaf { call, proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, proofs, vec![notes_secret_key]),
+            vec![],
+        )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[notes_secret_key])?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[notes_secret_key])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Create a DAO transfer proposal.
@@ -2480,24 +2451,7 @@ impl Drk {
 
         // Now we need to do a lookup for the zkas proof bincodes, and create
         // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC. First we grab the fee call from money.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom(
-                "[dao_transfer_proposal_tx] Fee circuit not found".to_string(),
-            ))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuit proving key
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
-        // Now we grab the DAO bins
+        // We also do this through the RPC. First we grab the DAO bins.
         let zkas_bins = self.lookup_zkas(&DAO_CONTRACT_ID).await?;
 
         let Some(propose_burn_zkbin) =
@@ -2585,29 +2539,16 @@ impl Drk {
         let call = ContractCall { contract_id: *DAO_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing above call
-        let mut tx_builder = TransactionBuilder::new(ContractCallLeaf { call, proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, proofs, signature_secrets),
+            vec![],
+        )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Create a DAO generic proposal transaction.
@@ -2663,22 +2604,7 @@ impl Drk {
 
         // Now we need to do a lookup for the zkas proof bincodes, and create
         // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC. First we grab the fee call from money.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("[dao_generic_proposal_tx] Fee circuit not found".to_string()))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuit proving key
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
-        // Now we grab the DAO bins
+        // We also do this through the RPC. First we grab the DAO bins.
         let zkas_bins = self.lookup_zkas(&DAO_CONTRACT_ID).await?;
 
         let Some(propose_burn_zkbin) =
@@ -2766,29 +2692,16 @@ impl Drk {
         let call = ContractCall { contract_id: *DAO_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing above call
-        let mut tx_builder = TransactionBuilder::new(ContractCallLeaf { call, proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, proofs, signature_secrets),
+            vec![],
+        )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Vote on a DAO proposal
@@ -2868,22 +2781,7 @@ impl Drk {
 
         // Now we need to do a lookup for the zkas proof bincodes, and create
         // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC. First we grab the fee call from money.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("[dao_vote] Fee circuit not found".to_string()))
-        };
-
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-
-        // Creating Fee circuit proving key
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
-        // Now we grab the DAO bins
+        // We also do this through the RPC. First we grab the DAO bins.
         let zkas_bins = self.lookup_zkas(&DAO_CONTRACT_ID).await?;
 
         let Some(dao_vote_burn_zkbin) =
@@ -2984,29 +2882,16 @@ impl Drk {
         let call = ContractCall { contract_id: *DAO_CONTRACT_ID, data };
 
         // Create the TransactionBuilder containing above call
-        let mut tx_builder = TransactionBuilder::new(ContractCallLeaf { call, proofs }, vec![])?;
+        let mut tx_builder = TransactionBuilder::new(
+            ContractCallLeaf::new(call, proofs, signature_secrets),
+            vec![],
+        )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let tree = self.get_money_tree().await?;
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&signature_secrets)?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Execute a DAO transfer proposal.
@@ -3150,23 +3035,15 @@ impl Drk {
             return Err(Error::Custom("[dao_exec_transfer] Burn circuit not found".to_string()))
         };
 
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("[dao_exec_transfer] Fee circuit not found".to_string()))
-        };
-
         let mint_zkbin = ZkBinary::decode(&mint_zkbin.1, false)?;
         let burn_zkbin = ZkBinary::decode(&burn_zkbin.1, false)?;
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
 
         let mint_circuit = ZkCircuit::new(empty_witnesses(&mint_zkbin)?, &mint_zkbin);
         let burn_circuit = ZkCircuit::new(empty_witnesses(&burn_zkbin)?, &burn_zkbin);
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
 
         // Creating Mint, Burn and Fee circuits proving keys
         let mint_pk = ProvingKey::build(mint_zkbin.k, &mint_circuit);
         let burn_pk = ProvingKey::build(burn_zkbin.k, &burn_circuit);
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
 
         // Now we grab the DAO bins
         let zkas_bins = self.lookup_zkas(&DAO_CONTRACT_ID).await?;
@@ -3330,16 +3207,20 @@ impl Drk {
 
         // Create the TransactionBuilder containing above calls
         let mut tx_builder = TransactionBuilder::new(
-            ContractCallLeaf { call: exec_call, proofs: exec_proofs },
+            ContractCallLeaf::new(exec_call, exec_proofs, vec![exec_signature_secret]),
             vec![
                 DarkTree::new(
-                    ContractCallLeaf { call: auth_transfer_call, proofs: auth_transfer_proofs },
+                    ContractCallLeaf::new(auth_transfer_call, auth_transfer_proofs, vec![]),
                     vec![],
                     None,
                     None,
                 ),
                 DarkTree::new(
-                    ContractCallLeaf { call: transfer_call, proofs: transfer_secrets.proofs },
+                    ContractCallLeaf::new(
+                        transfer_call,
+                        transfer_secrets.proofs,
+                        transfer_secrets.signature_secrets,
+                    ),
                     vec![],
                     None,
                     None,
@@ -3347,32 +3228,11 @@ impl Drk {
             ],
         )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let auth_transfer_sigs = tx.create_sigs(&[])?;
-        let transfer_sigs = tx.create_sigs(&transfer_secrets.signature_secrets)?;
-        let exec_sigs = tx.create_sigs(&[exec_signature_secret])?;
-        tx.signatures = vec![auth_transfer_sigs, transfer_sigs, exec_sigs];
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&transfer_secrets.signature_secrets)?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&[exec_signature_secret])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 
     /// Execute a DAO generic proposal.
@@ -3463,17 +3323,7 @@ impl Drk {
 
         // Now we need to do a lookup for the zkas proof bincodes, and create
         // the circuit objects and proving keys so we can build the transaction.
-        // We also do this through the RPC. First we grab the calls from money.
-        let zkas_bins = self.lookup_zkas(&MONEY_CONTRACT_ID).await?;
-        let Some(fee_zkbin) = zkas_bins.iter().find(|x| x.0 == MONEY_CONTRACT_ZKAS_FEE_NS_V1)
-        else {
-            return Err(Error::Custom("[dao_exec_generic] Fee circuit not found".to_string()))
-        };
-        let fee_zkbin = ZkBinary::decode(&fee_zkbin.1, false)?;
-        let fee_circuit = ZkCircuit::new(empty_witnesses(&fee_zkbin)?, &fee_zkbin);
-        let fee_pk = ProvingKey::build(fee_zkbin.k, &fee_circuit);
-
-        // Now we grab the DAO bins
+        // We also do this through the RPC. First we grab the DAO bins.
         let zkas_bins = self.lookup_zkas(&DAO_CONTRACT_ID).await?;
 
         let (namespace, early_exec_secret_key) = match early {
@@ -3491,9 +3341,6 @@ impl Drk {
         let dao_exec_zkbin = ZkBinary::decode(&dao_exec_zkbin.1, false)?;
         let dao_exec_circuit = ZkCircuit::new(empty_witnesses(&dao_exec_zkbin)?, &dao_exec_zkbin);
         let dao_exec_pk = ProvingKey::build(dao_exec_zkbin.k, &dao_exec_circuit);
-
-        // Fetch our money Merkle tree
-        let tree = self.get_money_tree().await?;
 
         // Retrieve next block height and current block time target,
         // to compute their window.
@@ -3538,29 +3385,14 @@ impl Drk {
 
         // Create the TransactionBuilder containing above calls
         let mut tx_builder = TransactionBuilder::new(
-            ContractCallLeaf { call: exec_call, proofs: exec_proofs },
+            ContractCallLeaf::new(exec_call, exec_proofs, vec![exec_signature_secret]),
             vec![],
         )?;
 
-        // We first have to execute the fee-less tx to gather its used gas, and then we feed
-        // it into the fee-creating function.
-        let mut tx = tx_builder.build()?;
-        let exec_sigs = tx.create_sigs(&[exec_signature_secret])?;
-        tx.signatures = vec![exec_sigs];
+        // Add fee - marks tx_local output if needed and appends fee call
+        self.append_fee_call(&mut tx_builder).await?;
 
-        let (fee_call, fee_proofs, fee_secrets) =
-            self.append_fee_call(&tx, &tree, &fee_pk, &fee_zkbin, None).await?;
-
-        // Append the fee call to the transaction
-        tx_builder.append(ContractCallLeaf { call: fee_call, proofs: fee_proofs }, vec![])?;
-
-        // Now build the actual transaction and sign it with all necessary keys.
-        let mut tx = tx_builder.build()?;
-        let sigs = tx.create_sigs(&[exec_signature_secret])?;
-        tx.signatures.push(sigs);
-        let sigs = tx.create_sigs(&fee_secrets)?;
-        tx.signatures.push(sigs);
-
-        Ok(tx)
+        // Build and sign the transaction
+        tx_builder.build_signed()
     }
 }
