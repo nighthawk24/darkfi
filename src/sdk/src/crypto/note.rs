@@ -66,7 +66,15 @@ impl AeadEncryptedNote {
 
     pub fn decrypt<D: Decodable>(&self, secret: &SecretKey) -> Result<D, ContractError> {
         let shared_secret = diffie_hellman::sapling_ka_agree(secret, &self.ephem_public)?;
-        let key = diffie_hellman::kdf_sapling(&shared_secret, &self.ephem_public);
+        self.decrypt_with_shared::<D>(&shared_secret.to_bytes())
+    }
+
+    /// Open the note with a compressed shared secret from [`diffie_hellman::sapling_ka_agree_batch`].
+    pub fn decrypt_with_shared<D: Decodable>(
+        &self,
+        shared_secret: &[u8],
+    ) -> Result<D, ContractError> {
+        let key = diffie_hellman::kdf_sapling_compressed(shared_secret, &self.ephem_public);
 
         let ct_len = self.ciphertext.len();
         let mut plaintext = vec![0_u8; ct_len];
@@ -175,6 +183,36 @@ mod tests {
         let plaintext2: String = encrypted_note.decrypt(&keypair.secret).unwrap();
 
         assert_eq!(plaintext, plaintext2);
+    }
+
+    #[test]
+    fn test_aead_note_batch_matches_sequential() {
+        let keypair = Keypair::random(&mut OsRng);
+        let other = Keypair::random(&mut OsRng);
+        let notes: Vec<AeadEncryptedNote> = (0..7)
+            .map(|i| {
+                let recipient = if i == 3 { &other.public } else { &keypair.public };
+                AeadEncryptedNote::encrypt(&format!("note-{i}"), recipient, &mut OsRng).unwrap()
+            })
+            .collect();
+        let epks: Vec<PublicKey> = notes.iter().map(|note| note.ephem_public).collect();
+        let batch = diffie_hellman::sapling_ka_agree_batch(&keypair.secret, &epks);
+        assert_eq!(batch.len(), notes.len());
+        for (i, (note, shared)) in notes.iter().zip(batch).enumerate() {
+            let sequential = diffie_hellman::sapling_ka_agree(&keypair.secret, &note.ephem_public)
+                .unwrap()
+                .to_bytes();
+            let shared = shared.unwrap();
+            assert_eq!(shared, sequential, "batch shared secret {i}");
+            let opened: Result<String, _> = note.decrypt_with_shared(&shared);
+            let direct: Result<String, _> = note.decrypt(&keypair.secret);
+            assert_eq!(opened.ok(), direct.ok());
+            if i == 3 {
+                assert!(note.decrypt::<String>(&keypair.secret).is_err());
+            } else {
+                assert_eq!(note.decrypt::<String>(&keypair.secret).unwrap(), format!("note-{i}"));
+            }
+        }
     }
 
     #[test]
