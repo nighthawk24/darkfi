@@ -89,6 +89,26 @@ fn zkas_lookup_fallback() -> Option<ZkasLookupFallback> {
     zkas_lookup_fallback_slot().read().ok().and_then(|g| *g)
 }
 
+/// Optional `(next_block_height, block_target)` used when darkfid RPC is absent
+/// (lightwalletd-only wallets). Cleared by passing `(None, None)`.
+static CHAIN_CONTEXT_FALLBACK: OnceLock<RwLock<(Option<u32>, Option<u32>)>> = OnceLock::new();
+
+fn chain_context_fallback_slot() -> &'static RwLock<(Option<u32>, Option<u32>)> {
+    CHAIN_CONTEXT_FALLBACK.get_or_init(|| RwLock::new((None, None)))
+}
+
+/// Install process-wide chain height / block-target values from lightwalletd
+/// `GetLightInfo` so DAO flows can compute blockwindows without darkfid.
+pub fn set_chain_context_fallback(next_height: Option<u32>, block_target: Option<u32>) {
+    if let Ok(mut slot) = chain_context_fallback_slot().write() {
+        *slot = (next_height, block_target);
+    }
+}
+
+fn chain_context_fallback() -> (Option<u32>, Option<u32>) {
+    chain_context_fallback_slot().read().ok().map(|g| *g).unwrap_or((None, None))
+}
+
 impl DarkfidRpcClient {
     pub async fn new(endpoint: Url, ex: ExecutorPtr) -> Self {
         let client = RpcClient::new(endpoint.clone(), ex.clone()).await.ok();
@@ -598,6 +618,9 @@ impl Drk {
 
     /// Queries darkfid for current best fork next height.
     pub async fn get_next_block_height(&self) -> Result<u32> {
+        if let Some(height) = chain_context_fallback().0 {
+            return Ok(height);
+        }
         if self.rpc_client.is_none() {
             return Err(Error::Custom(
                 "darkfid RPC is required for get_next_block_height (DAO); \
@@ -619,6 +642,9 @@ impl Drk {
 
     /// Queries darkfid for currently configured block target time.
     pub async fn get_block_target(&self) -> Result<u32> {
+        if let Some(target) = chain_context_fallback().1 {
+            return Ok(target);
+        }
         let rep = self
             .darkfid_daemon_request("blockchain.block_target", &JsonValue::Array(vec![]))
             .await?;
