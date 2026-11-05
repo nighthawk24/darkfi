@@ -117,7 +117,7 @@ x11-clipboard = "0.9.3"
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = "0.2.0"
 # Required by Arti: tor-dirmgr
-tor-dirmgr = { version="0.45.0", features=["static"] }
+tor-dirmgr = { version="0.48.0", features=["static"] }
 # Required by cpal (rodio) AAudio backend to access the JavaVM/Activity
 ndk-context = "0.1.1"
 # Android uses MediaCodec for hardware-accelerated H.264 decoding instead of rav1d
@@ -125,7 +125,7 @@ ndk-context = "0.1.1"
 [target.'cfg(target_os = "windows")'.dependencies]
 # Used by tor-dirmgr
 #rusqlite = {version = "0.37.0", features = ["bundled"]}
-tor-dirmgr = { version="0.45.0", features=["static"] }
+tor-dirmgr = { version="0.48.0", features=["static"] }
 
 [package.metadata.android.activity_attributes]
 "android:exported" = "true"
