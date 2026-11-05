@@ -17,9 +17,10 @@
  */
 
 use blake2b_simd::{Hash as Blake2bHash, Params as Blake2bParams};
-use pasta_curves::group::prime::PrimeCurveAffine;
-use pasta_curves::group::{Curve, GroupEncoding, Wnaf};
-use pasta_curves::pallas;
+use pasta_curves::{
+    group::{prime::PrimeCurveAffine, Curve, GroupEncoding, Wnaf},
+    pallas,
+};
 
 use super::{util::fp_mod_fv, PublicKey, SecretKey};
 use crate::error::ContractError;

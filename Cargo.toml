@@ -193,8 +193,10 @@ event-graph = [
     "darkfi-serial",
     "darkfi-serial/collections",
     "darkfi-serial/hash",
-    
+
     "net",
+    # RLN membership proofs and Poseidon event ids.
+    "zk",
 ]
 
 p2p-nym = []

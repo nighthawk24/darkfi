@@ -7,6 +7,9 @@ jobs:
     steps:
       - name: irc push
         uses: rectalogic/notify-irc@v1
+        # GitHub-hosted runners cannot reach irc1.dark.fi:6697 (connection
+        # refused / network unreachable). Keep the notification best-effort.
+        continue-on-error: true
         if: github.event_name == 'push'
         with:
           channel: "#dev"
@@ -15,6 +18,7 @@ jobs:
           message: ${{ github.actor }} pushed ${{ join(github.event.commits.*.message) }} ${{ github.event.ref }}
       - name: irc pull request
         uses: rectalogic/notify-irc@v1
+        continue-on-error: true
         if: github.event_name == 'pull_request'
         with:
           channel: "#dev"
