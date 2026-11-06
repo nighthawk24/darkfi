@@ -103,11 +103,12 @@ pub fn spawn_decoder_thread(
                 return;
             };
 
-            let mut try_again = match decoder.send_data(av1_frame, None, None, None) {
-                Ok(()) => false,
-                Err(Rav1dError::TryAgain) => true,
-                Err(_) => continue,
-            };
+            let mut try_again =
+                match decoder.send_data(av1_frame.into_boxed_slice(), None, None, None) {
+                    Ok(()) => false,
+                    Err(Rav1dError::TryAgain) => true,
+                    Err(_) => continue,
+                };
 
             // Try to get decoded pictures
             loop {
@@ -147,9 +148,9 @@ fn process(
     renderer: &Renderer,
 ) -> Result<(), ()> {
     // rav1d stores data as planar GBR (Y=G, U=B, V=R)
-    let y_plane = pic.plane_data(PlanarImageComponent::Y);
-    let u_plane = pic.plane_data(PlanarImageComponent::U);
-    let v_plane = pic.plane_data(PlanarImageComponent::V);
+    let y_plane = pic.plane(PlanarImageComponent::Y);
+    let u_plane = pic.plane(PlanarImageComponent::U);
+    let v_plane = pic.plane(PlanarImageComponent::V);
 
     let y_stride = pic.stride(PlanarImageComponent::Y) as usize;
     let u_stride = pic.stride(PlanarImageComponent::U) as usize;
