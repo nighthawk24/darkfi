@@ -23,7 +23,7 @@ use kvdb_overlay::Database as KvDb;
 use std::io::Write;
 use ui_consts::*;
 
-use super::{read_joined_channels, write_joined_channels};
+use super::{append_joined_channel, read_joined_channels, write_joined_channels};
 use crate::{
     app::{
         node::{create_button, create_layer, create_menu, create_text, create_vector_art},
@@ -41,8 +41,8 @@ use crate::{
     sfx, shape,
     theme::wire_color,
     ui::{
-        emoji_picker::EmojiMeshesPtr, Button, Layer, Menu, ShapeVertex, Text, VectorArt,
-        VectorShape,
+        emoji_picker::EmojiMeshesPtr, Button, Layer, Menu, RedrawTrigger, ShapeVertex, Text,
+        VectorArt, VectorShape,
     },
     util::i18n::I18nBabelFish,
 };
@@ -694,6 +694,44 @@ pub async fn setup_settings_button(app: &App, chat_layer: SceneNodePtr) {
 
 fn valid_key(s: &str) -> bool {
     bs58::decode(s).into_vec().is_ok_and(|bytes| bytes.len() == 32)
+}
+
+/// Join a channel or contact (`#name` / `@name`) if needed and retarget
+/// the one chat screen onto it.
+pub async fn join_and_open_chat(
+    sg_root: &SceneNodePtr,
+    channel: &str,
+    channel_vis: &PropertyBool,
+    redraw: &RedrawTrigger,
+) {
+    let atom = &mut redraw.make_guard(gfxtag!("join_channel"));
+
+    // One chat screen: an unknown channel is newly joined before
+    // retargeting the chatview.
+    let main_menu = sg_root.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
+    let items_prop = main_menu.get_property("items").unwrap();
+    let is_new = !items_prop.contains_str(channel);
+    if is_new {
+        items_prop.push_str(atom, Role::App, channel).unwrap();
+        append_joined_channel(channel);
+    }
+
+    let node = sg_root.lookup_node("/window/content/chat/main_chat_layer").unwrap();
+    node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
+    channel_vis.set(atom, false);
+    let chatty = node.lookup_node("/content/chatty").unwrap();
+    let mut chan_data = vec![];
+    channel.to_string().encode(&mut chan_data).unwrap();
+    let _ = chatty.call_method("set_channel", chan_data).await;
+
+    if is_new {
+        // Trigger rescan for this channel
+        if let Some(darkirc) = sg_root.lookup_node("/plugin/darkirc") {
+            let mut data = vec![];
+            channel.to_string().encode(&mut data).unwrap();
+            darkirc.call_method("rescan", data).await.unwrap();
+        }
+    }
 }
 
 /// Grey an add button out until its name and key are valid. When

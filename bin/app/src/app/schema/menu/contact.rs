@@ -17,7 +17,7 @@
  */
 
 use bs58;
-use darkfi_serial::{async_trait, deserialize, Encodable, SerialDecodable, SerialEncodable};
+use darkfi_serial::{async_trait, deserialize, SerialDecodable, SerialEncodable};
 use kvdb_overlay::Database as KvDb;
 use ui_consts::*;
 
@@ -34,9 +34,7 @@ pub struct Contact {
 }
 
 use super::{
-    super::{append_joined_channel, chat},
-    edit_buttons,
-    edit_switch::edit_switch,
+    super::chat, edit_buttons, edit_switch::edit_switch, join_and_open_chat,
     setup_add_button_validity, valid_key, BTN_TEXT_Y, CHANNEL_ITEM_HEIGHT, MENU_BTN_W_L,
 };
 use crate::{
@@ -1446,6 +1444,7 @@ pub async fn make(
     let menu_prop2 = menu_node.get_property("items").unwrap();
     let redraw2 = app.redraw_trigger.clone();
     let sg_root2 = app.sg_root.clone();
+    let contact_vis2 = contact_is_visible.clone();
 
     let save_contact = app.ex.spawn(async move {
         while let Ok(_) = addcontact_recvr.recv().await {
@@ -1483,6 +1482,11 @@ pub async fn make(
             let atom = &mut redraw2.make_guard(gfxtag!("clear_contact_fields"));
             name_prop.set_str(atom, Role::App, 0, "").unwrap();
             public_prop.set_str(atom, Role::App, 0, "").unwrap();
+
+            nickedit2.call_method("unfocus", vec![]).await.unwrap();
+            secedit2.call_method("unfocus", vec![]).await.unwrap();
+
+            join_and_open_chat(&sg_root2, &contact_name, &contact_vis2, &redraw2).await;
         }
     });
     app.tasks.lock().push(save_contact);
@@ -1492,11 +1496,6 @@ pub async fn make(
     menu_node.register("select", slot).unwrap();
 
     let sg_root = app.sg_root.clone();
-    let renderer = app.renderer.clone();
-    let ex = app.ex.clone();
-    let kv_db2 = kv_db.clone();
-    let i18n_fish2 = i18n_fish.clone();
-    let emoji_meshes2 = emoji_meshes.clone();
     let redraw2 = app.redraw_trigger.clone();
     let contact_vis = contact_is_visible.clone();
 
@@ -1504,44 +1503,7 @@ pub async fn make(
         while let Ok(data) = recvr.recv().await {
             let contact: String = deserialize(&data).unwrap();
             i!("Selected contact: {contact}");
-            let path = format!("/window/content/chat/{}_chat_layer", &contact);
-            let atom = &mut redraw2.make_guard(gfxtag!("contact_selected"));
-
-            // One chat screen: retarget the chatview.
-            if let Some(node) = sg_root.lookup_node("/window/content/chat/main_chat_layer") {
-                node.set_property_bool(atom, Role::App, "is_visible", true).unwrap();
-                contact_vis.set(atom, false);
-                let chatty = node.lookup_node("/content/chatty").unwrap();
-                let mut chan_data = vec![];
-                contact.encode(&mut chan_data).unwrap();
-                let _ = chatty.call_method("set_channel", chan_data).await;
-                continue;
-            }
-
-            let main_menu =
-                sg_root.lookup_node("/window/content/chat/menu_layer/main_menu").unwrap();
-            let items_prop = main_menu.get_property("items").unwrap();
-            if !items_prop.contains_str(&contact) {
-                items_prop.push_str(atom, Role::App, &contact).unwrap();
-            }
-
-            append_joined_channel(&contact);
-
-            contact_vis.set(atom, false);
-
-            // Trigger a draw pass so the newly added node's parent_rect
-            // gets set. The pass walks the whole tree so the new layer is
-            // drawn with correct geometry.
-            redraw2.trigger();
-
-            // Trigger rescan to fetch this contact's DM history from the DAG.
-            // The rescan reloads contacts first, so a freshly added contact's
-            // crypto box is available, then replays DMs as "@name".
-            if let Some(darkirc) = sg_root.lookup_node("/plugin/darkirc") {
-                let mut data = vec![];
-                contact.encode(&mut data).unwrap();
-                darkirc.call_method("rescan", data).await.unwrap();
-            }
+            join_and_open_chat(&sg_root, &contact, &contact_vis, &redraw2).await;
         }
     });
     app.tasks.lock().push(listen_select);
