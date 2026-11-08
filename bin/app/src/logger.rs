@@ -35,20 +35,19 @@ use darkfi::util::logger::{EventFormatter, Level, TargetFilter};
 #[cfg(feature = "enable-filelog")]
 const LOGFILE_MAXSIZE: usize = 5_000_000;
 
-static MUTED_TARGETS: &[&'static str] = &[
+/// Targets demoted to `Info` in the terminal layer and fully silenced (`OFF`)
+/// in the Android logcat layer. P2P peer-discovery targets are deliberately
+/// absent so connectivity problems stay diagnosable, especially on Android
+/// where logcat is the only practical log source.
+static MUTED_TARGETS: &[&str] = &[
     "fjall",
     "rustls",
     "async_io",
     "polling",
     "net::channel",
     "net::message_publisher",
-    "net::hosts",
-    "net::protocol",
-    "net::session",
-    "net::outbound_session",
+    "net::protocol_ping",
     "net::tcp",
-    "net::p2p::seed",
-    "net::refinery::handshake_node()",
     "system::publisher",
     "event_graph::dag_sync()",
     "event_graph::dag_insert()",

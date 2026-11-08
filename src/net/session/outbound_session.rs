@@ -45,9 +45,10 @@ use super::{
         channel::ChannelPtr,
         connector::Connector,
         dnet::{self, dnetev, DnetEvent},
-        hosts::{HostColor, HostContainer, HostState},
+        hosts::{HostColor, HostContainer, HostState, HostsPtr},
         message::GetAddrsMessage,
         p2p::{P2p, P2pPtr},
+        settings::DEFAULT_GETADDRS_MAX,
     },
     Session, SessionBitFlag, SESSION_OUTBOUND,
 };
@@ -224,6 +225,39 @@ struct Slot {
     channel_id: AtomicU32,
 }
 
+/// Frees the registry slot for an outbound address when the owning slot task
+/// is cancelled (slot removal on `outbound_connections` decrease, or P2P
+/// shutdown) while the address is in the transient `Connect` state. Without
+/// this, cancelled dials leave the address stuck in `Connect` forever, making
+/// it unrefinable, uninsertable and unconnectable for the rest of the process
+/// lifetime. Disarm it once the address reaches a terminal state handled
+/// elsewhere (Suspend bookkeeping or a registered channel).
+struct ConnectGuard {
+    hosts: HostsPtr,
+    addr: Option<Url>,
+}
+
+impl ConnectGuard {
+    fn new(hosts: HostsPtr, addr: Url) -> Self {
+        Self { hosts, addr: Some(addr) }
+    }
+
+    fn disarm(&mut self) {
+        self.addr = None;
+    }
+}
+
+impl Drop for ConnectGuard {
+    fn drop(&mut self) {
+        if let Some(addr) = self.addr.take() {
+            if let Err(e) = self.hosts.unregister(&addr) {
+                verbose!(target: "net::outbound_session",
+                    "Error while freeing addr={addr} after cancelled connect: {e}");
+            }
+        }
+    }
+}
+
 impl Slot {
     fn new(session: Weak<OutboundSession>, slot: u32) -> Arc<Self> {
         let settings = session.upgrade().unwrap().p2p().settings();
@@ -257,6 +291,14 @@ impl Slot {
     async fn stop(self: Arc<Self>) {
         self.connector.stop();
         self.process.stop().await;
+
+        // The run loop cannot emit events for in-flight dials cancelled by
+        // the stop above, so clear the slot state here to keep dnet
+        // subscribers (e.g. the app's outbound_peers UI) truthful.
+        dnetev!(self, OutboundSlotDisconnected, {
+            slot: self.slot,
+            err: "Slot stopped".to_string()
+        });
     }
 
     /// Address selection algorithm that builds an ordered vector of addresses:
@@ -325,6 +367,10 @@ impl Slot {
             trace!(target: "net::outbound_session::fetch_addrs", "[P2P] fetch_addrs: collected {} grey addrs (total: {})", remaining, addrs.len());
         }
 
+        debug!(target: "net::outbound_session::fetch_addrs",
+            "Slot #{} address candidates={} lists=[{}]",
+            self.slot, addrs.len(), container.counts_string());
+
         hosts.check_addrs(addrs).await
     }
 
@@ -366,7 +412,9 @@ impl Slot {
                 self.slot);
                 addr
             } else {
-                debug!(target: "net::outbound_session::run", "No address found! Activating peer discovery...");
+                debug!(target: "net::outbound_session::run",
+                    "No address found! lists=[{}] Activating peer discovery...",
+                    hosts.container.counts_string());
                 dnetev!(self, OutboundSlotSleeping, {
                     slot: self.slot,
                 });
@@ -383,6 +431,8 @@ impl Slot {
             let host = addr.0;
             let last_seen = addr.1;
             let slot = self.slot;
+
+            let mut addr_guard = ConnectGuard::new(hosts.clone(), host.clone());
 
             verbose!(
                 target: "net::outbound_session::try_connect",
@@ -408,6 +458,8 @@ impl Slot {
                     });
 
                     self.channel_id.store(0, Ordering::Relaxed);
+
+                    addr_guard.disarm();
 
                     continue
                 }
@@ -468,15 +520,24 @@ impl Slot {
                     verbose!(target: "net::outbound_session", "Error while suspending addr={}: {e}", channel.display_address());
                 }
 
+                addr_guard.disarm();
+
                 continue
             }
 
             self.channel_id.store(channel.info.id, Ordering::Relaxed);
 
+            addr_guard.disarm();
+
             // Wait for channel to close
             stop_sub.receive().await;
 
             self.channel_id.store(0, Ordering::Relaxed);
+
+            dnetev!(self, OutboundSlotDisconnected, {
+                slot: self.slot,
+                err: "Channel closed".to_string()
+            });
         }
     }
 
@@ -500,8 +561,14 @@ impl Slot {
 
                 // Immediately return if the Connector has stopped.
                 // This indicates a shutdown of the P2P network and
-                // should not result in hostlist modifications.
+                // should not result in hostlist modifications. The registry
+                // state is freed so the address is not stuck in `Connect`
+                // for the rest of the process lifetime.
                 if let Error::ConnectorStopped(message) = err {
+                    if let Err(e) = self.p2p().hosts().unregister(&addr) {
+                        verbose!(target: "net::outbound_session::try_connect",
+                            "Error while unregistering addr={addr}, err={e}");
+                    }
                     return Err(Error::ConnectFailed(message));
                 }
 
@@ -620,7 +687,6 @@ impl PeerDiscoveryBase for PeerDiscovery {
             let settings = self.p2p().settings().read_arc().await;
             let outbound_peer_discovery_attempt_time =
                 settings.outbound_peer_discovery_attempt_time;
-            let outbound_connections = settings.outbound_connections;
             let getaddrs_max = settings.getaddrs_max;
             let transports = HostContainer::shareable_schemes(
                 &settings.active_profiles,
@@ -667,9 +733,13 @@ impl PeerDiscoveryBase for PeerDiscovery {
                 });
 
                 let get_addrs = GetAddrsMessage {
-                    max: getaddrs_max.unwrap_or(outbound_connections.min(u32::MAX as usize) as u32),
+                    max: getaddrs_max.unwrap_or(DEFAULT_GETADDRS_MAX),
                     transports,
                 };
+
+                debug!(target: "net::outbound_session::peer_discovery",
+                    "Broadcasting GetAddrs(max={}, transports={:?}) to {} peers",
+                    get_addrs.max, get_addrs.transports, self.p2p().peers_count());
 
                 if let Err(e) = self.p2p().broadcast(&get_addrs).await {
                     debug!(
@@ -687,11 +757,13 @@ impl PeerDiscoveryBase for PeerDiscovery {
                 )
                 .await;
 
+                let counts = self.p2p().hosts().container.counts_string();
+
                 match result {
                     Ok(addrs_len) => {
                         verbose!(
                             target: "net::outbound_session::peer_discovery",
-                            "[P2P] [PEER DISCOVERY] Discovered {addrs_len} peers"
+                            "[P2P] [PEER DISCOVERY] Discovered {addrs_len} peers lists=[{counts}]"
                         );
                         // Reset on success
                         getaddr_failures = 0;
@@ -699,7 +771,7 @@ impl PeerDiscoveryBase for PeerDiscovery {
                     Err(_) => {
                         verbose!(
                             target: "net::outbound_session::peer_discovery",
-                            "[P2P] [PEER DISCOVERY] Waiting for addrs timed out."
+                            "[P2P] [PEER DISCOVERY] Waiting for addrs timed out. lists=[{counts}]"
                         );
                         getaddr_failures += 1;
                     }

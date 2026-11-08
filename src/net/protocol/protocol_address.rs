@@ -30,7 +30,7 @@ use super::{
         message_publisher::MessageSubscription,
         p2p::P2pPtr,
         session::SESSION_OUTBOUND,
-        settings::Settings,
+        settings::{Settings, DEFAULT_GETADDRS_MAX},
     },
     protocol_base::{ProtocolBase, ProtocolBasePtr},
     protocol_jobs_manager::{ProtocolJobsManager, ProtocolJobsManagerPtr},
@@ -268,7 +268,6 @@ impl ProtocolBase for ProtocolAddress {
         );
 
         let settings = self.settings.read().await;
-        let outbound_connections = settings.outbound_connections;
         let transports = HostContainer::shareable_schemes(
             &settings.active_profiles,
             &settings.mixed_profiles,
@@ -288,10 +287,8 @@ impl ProtocolBase for ProtocolAddress {
 
         // Send get_address message.
         // We ask for a maximum of u8::MAX addresses from a single node
-        let get_addrs = GetAddrsMessage {
-            max: getaddrs_max.unwrap_or(outbound_connections.min(u32::MAX as usize) as u32),
-            transports,
-        };
+        let get_addrs =
+            GetAddrsMessage { max: getaddrs_max.unwrap_or(DEFAULT_GETADDRS_MAX), transports };
         self.channel.send(&get_addrs).await?;
 
         debug!(

@@ -71,11 +71,6 @@ indoc = "2.0.7"
 # pause the stream while idle so it holds no system wakelock.
 rodio = { git = "https://github.com/RustAudio/rodio", default-features = false, features = ["playback", "vorbis", "pulseaudio", "experimental"] }
 
-# This makes a HUGE difference to decoding speed.
-# Over 160s to like 2s.
-[profile.dev.package.rav1d]
-opt-level = 3
-
 [features]
 default = ["enable-plugins", "schema-app"]
 emulate-android = []
@@ -107,9 +102,10 @@ halo2_gadgets = { git="https://github.com/parazyd/halo2", branch="v050" }
 dirs = "5.0.1"
 # Open URLs in the system's default handler on click (Android uses a JNI intent instead).
 open = "5"
-# AV1 video decoding - rav1d with Rust API from leo030303 fork
-# Enable ASM routines for non-Android platforms.
-rav1d = { git = "https://github.com/memorysafety/rav1d.git", features = ["asm", "bitdepth_8"] }
+# AV1 video decoding.
+# default-features = false is required: rav1d's defaults enable the "asm"
+# features, which need NASM and break the zigbuild/xwin cross-compilers.
+rav1d = { git = "https://github.com/memorysafety/rav1d.git", default-features = false, features = ["bitdepth_8"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11-clipboard = "0.9.3"

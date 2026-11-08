@@ -43,6 +43,13 @@ pub enum BanPolicy {
     Relaxed,
 }
 
+/// Fallback maximum number of addresses requested via `GetAddrs` messages
+/// when `getaddrs_max` is not configured. Peers reply with up to twice this
+/// number. Deliberately larger than typical `outbound_connections` values so
+/// discovery accumulates a healthy hostlist instead of barely filling the
+/// connection slots.
+pub const DEFAULT_GETADDRS_MAX: u32 = 32;
+
 /// P2P network settings. The scope of this is a P2P network instance
 /// configured by the library user.
 #[derive(Debug, Clone)]
@@ -102,7 +109,7 @@ pub struct Settings {
     pub outbound_peer_discovery_attempt_time: u64,
     /// Maximum number of addresses (with preferred transports) to receive from
     /// seeds and peers.
-    /// If undefined, `outbound_connections` will be used instead.
+    /// If undefined, `DEFAULT_GETADDRS_MAX` will be used instead.
     pub getaddrs_max: Option<u32>,
     /// P2P datastore path
     pub p2p_datastore: Option<String>,
