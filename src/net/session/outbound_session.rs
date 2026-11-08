@@ -325,6 +325,10 @@ impl Slot {
             trace!(target: "net::outbound_session::fetch_addrs", "[P2P] fetch_addrs: collected {} grey addrs (total: {})", remaining, addrs.len());
         }
 
+        debug!(target: "net::outbound_session::fetch_addrs",
+            "Slot #{} address candidates={} lists=[{}]",
+            self.slot, addrs.len(), container.counts_string());
+
         hosts.check_addrs(addrs).await
     }
 
@@ -366,7 +370,9 @@ impl Slot {
                 self.slot);
                 addr
             } else {
-                debug!(target: "net::outbound_session::run", "No address found! Activating peer discovery...");
+                debug!(target: "net::outbound_session::run",
+                    "No address found! lists=[{}] Activating peer discovery...",
+                    hosts.container.counts_string());
                 dnetev!(self, OutboundSlotSleeping, {
                     slot: self.slot,
                 });
@@ -671,6 +677,10 @@ impl PeerDiscoveryBase for PeerDiscovery {
                     transports,
                 };
 
+                debug!(target: "net::outbound_session::peer_discovery",
+                    "Broadcasting GetAddrs(max={}, transports={:?}) to {} peers",
+                    get_addrs.max, get_addrs.transports, self.p2p().peers_count());
+
                 if let Err(e) = self.p2p().broadcast(&get_addrs).await {
                     debug!(
                         target: "net::outbound_session::peer_discovery",
@@ -687,11 +697,13 @@ impl PeerDiscoveryBase for PeerDiscovery {
                 )
                 .await;
 
+                let counts = self.p2p().hosts().container.counts_string();
+
                 match result {
                     Ok(addrs_len) => {
                         verbose!(
                             target: "net::outbound_session::peer_discovery",
-                            "[P2P] [PEER DISCOVERY] Discovered {addrs_len} peers"
+                            "[P2P] [PEER DISCOVERY] Discovered {addrs_len} peers lists=[{counts}]"
                         );
                         // Reset on success
                         getaddr_failures = 0;
@@ -699,7 +711,7 @@ impl PeerDiscoveryBase for PeerDiscovery {
                     Err(_) => {
                         verbose!(
                             target: "net::outbound_session::peer_discovery",
-                            "[P2P] [PEER DISCOVERY] Waiting for addrs timed out."
+                            "[P2P] [PEER DISCOVERY] Waiting for addrs timed out. lists=[{counts}]"
                         );
                         getaddr_failures += 1;
                     }

@@ -250,7 +250,8 @@ impl GreylistRefinery {
 
             if hosts.container.is_empty(HostColor::Grey) {
                 debug!(target: "net::refinery",
-                "Greylist is empty! Cannot start refinery process");
+                "Greylist is empty! Cannot start refinery process. lists=[{}]",
+                hosts.container.counts_string());
 
                 continue
             }
@@ -283,7 +284,8 @@ impl GreylistRefinery {
             match hosts.container.fetch_random_with_schemes(HostColor::Grey, &dialable_schemes) {
                 Some((url, _last_seen)) => {
                     if !hosts.refinable(&url) {
-                        debug!(target: "net::refinery", "Unable to refine addr={}", url);
+                        debug!(target: "net::refinery", "Unable to refine addr={} registry state={}",
+                               url, hosts.state_string(&url));
                         continue
                     }
 

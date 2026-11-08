@@ -313,6 +313,19 @@ impl HostContainer {
         self.lists.read()[color as usize].is_empty()
     }
 
+    /// Return a diagnostic string with the length of every hostlist.
+    pub fn counts_string(&self) -> String {
+        let lists = self.lists.read();
+        format!(
+            "grey={} white={} gold={} black={} dark={}",
+            lists[HostColor::Grey as usize].len(),
+            lists[HostColor::White as usize].len(),
+            lists[HostColor::Gold as usize].len(),
+            lists[HostColor::Black as usize].len(),
+            lists[HostColor::Dark as usize].len()
+        )
+    }
+
     /// Update the last_seen field for an address.
     pub fn update_last_seen(&self, color: HostColor, addr: &Url, last_seen: u64) {
         let mut lists = self.lists.write();
@@ -850,6 +863,14 @@ impl Hosts {
         }
     }
 
+    /// Return a diagnostic string describing the registry state of an address.
+    pub fn state_string(&self, addr: &Url) -> String {
+        match self.registry.lock().get(addr) {
+            Some(state) => state.to_string(),
+            None => "Untracked".to_string(),
+        }
+    }
+
     /// Return all connected channels.
     pub fn channels(&self) -> Vec<ChannelPtr> {
         self.registry
@@ -935,17 +956,33 @@ impl Hosts {
 
     /// Insert addresses into the greylist after filtering.
     pub(crate) async fn insert(&self, color: HostColor, addrs: &[(Url, u64)]) {
-        let filtered = self.filter_addresses(addrs).await;
+        let (filtered, rejected) = self.filter_addresses(addrs).await;
         let mut count = 0;
 
         for (addr, last_seen) in filtered {
             if self.try_register(addr.clone(), HostState::Insert).is_err() {
+                debug!(
+                    target: "net::hosts::insert",
+                    "Skipped {addr}: registry state={}", self.state_string(&addr)
+                );
                 continue;
             }
 
             self.container.store_and_trim(color, addr.clone(), last_seen);
             let _ = self.unregister(&addr);
             count += 1;
+        }
+
+        if !addrs.is_empty() {
+            debug!(
+                target: "net::hosts::insert",
+                "color={} received={} inserted={} rejected=[{}] lists=[{}]",
+                color.name(),
+                addrs.len(),
+                count,
+                reasons_string(&rejected),
+                self.container.counts_string()
+            );
         }
 
         if count > 0 {
@@ -961,11 +998,19 @@ impl Hosts {
 
         for (host, last_seen) in hosts {
             if seeds.contains(&host) || external.contains(&host) {
+                debug!(
+                    target: "net::hosts::check_addrs",
+                    "Skipped {host}: configured seed or external addr"
+                );
                 continue;
             }
 
-            if self.try_register(host.clone(), HostState::Connect).is_ok() {
-                return Some((host, last_seen))
+            match self.try_register(host.clone(), HostState::Connect) {
+                Ok(_) => return Some((host, last_seen)),
+                Err(_) => debug!(
+                    target: "net::hosts::check_addrs",
+                    "Skipped {host}: registry state={}", self.state_string(&host)
+                ),
             }
         }
 
@@ -1024,27 +1069,34 @@ impl Hosts {
         self.container.contains_hostname(&[HostColor::Gold, HostColor::White], host_str)
     }
 
-    async fn filter_addresses(&self, addrs: &[(Url, u64)]) -> Vec<(Url, u64)> {
+    async fn filter_addresses(
+        &self,
+        addrs: &[(Url, u64)],
+    ) -> (Vec<(Url, u64)>, Vec<(&'static str, usize)>) {
         let settings = self.settings.read().await;
         let external_addrs = self.external_addrs().await;
         let mut result = vec![];
+        let mut rejected: Vec<(&'static str, usize)> = vec![];
 
         'addr_loop: for (addr, last_seen) in addrs {
             // Validate format
             if addr.host_str().is_none() || addr.port().is_none() || addr.cannot_be_a_base() {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: invalid format");
+                tally("invalid format", &mut rejected);
                 continue;
             }
 
             // Skip configured seeds and peers
             if settings.seeds.contains(addr) || settings.peers.contains(addr) {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: seed or peer");
+                tally("seed or peer", &mut rejected);
                 continue;
             }
 
             // Skip blacklisted
             if self.is_blacklisted(addr) {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: blacklisted");
+                tally("blacklisted", &mut rejected);
                 continue;
             }
 
@@ -1055,6 +1107,7 @@ impl Hosts {
                 for ext in &external_addrs {
                     if host == ext.host().unwrap() {
                         verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: own address");
+                        tally("own address", &mut rejected);
                         continue 'addr_loop;
                     }
                 }
@@ -1062,6 +1115,7 @@ impl Hosts {
                 for ext in &settings.external_addrs {
                     if addr.port() == ext.port() {
                         verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: own address (localnet)");
+                        tally("own address", &mut rejected);
                         continue 'addr_loop;
                     }
                 }
@@ -1070,12 +1124,14 @@ impl Hosts {
             // Skip local addresses in production
             if !settings.localnet && self.is_local_host(addr) {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: local address");
+                tally("local address", &mut rejected);
                 continue;
             }
 
             // Validate transport-specific formats
             if !self.validate_transport(addr) {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: invalid transport");
+                tally("invalid transport", &mut rejected);
                 continue;
             }
 
@@ -1094,6 +1150,7 @@ impl Hosts {
             // Store valid addresses that cannot be dialed on the dark list.
             if !dialable {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: unsupported transport (darklist)");
+                tally("undialable (darklist)", &mut rejected);
                 self.container.store_and_trim(HostColor::Dark, addr.clone(), *last_seen);
                 self.container.refresh(HostColor::Dark, 86400);
                 continue;
@@ -1109,13 +1166,14 @@ impl Hosts {
                 .contains_any(&[HostColor::Gold, HostColor::White, HostColor::Grey], addr)
             {
                 verbose!(target: "net::hosts::filter_addresses", "Filtered {addr}: already in active lists");
+                tally("already in active lists", &mut rejected);
                 continue;
             }
 
             result.push((addr.clone(), *last_seen));
         }
 
-        result
+        (result, rejected)
     }
 
     fn validate_transport(&self, addr: &Url) -> bool {
@@ -1262,6 +1320,25 @@ impl Hosts {
     pub async fn subscribe_disconnect(&self) -> Subscription<Error> {
         self.disconnect_publisher.clone().subscribe().await
     }
+}
+
+fn tally(reason: &'static str, rejected: &mut Vec<(&'static str, usize)>) {
+    match rejected.iter_mut().find(|(r, _)| *r == reason) {
+        Some((_, count)) => *count += 1,
+        None => rejected.push((reason, 1)),
+    }
+}
+
+fn reasons_string(rejected: &[(&'static str, usize)]) -> String {
+    if rejected.is_empty() {
+        return "none".to_string()
+    }
+
+    rejected
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // Copied from https://doc.rust-lang.org/stable/src/core/net/ip_addr.rs.html#839

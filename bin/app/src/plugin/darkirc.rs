@@ -84,6 +84,9 @@ const HOUR_MS: u64 = 3_600_000;
 pub(crate) const P2P_OUTBOUND_ACTIVE: usize = 3;
 const P2P_OUTBOUND_SLEEP: usize = 1;
 
+/// Interval between periodic p2p hostlist stats log lines
+const NET_STATS_INTERVAL: u64 = 30;
+
 /// Update `outbound_peers` property useful for diagnostics
 const DNET_ENABLED: bool = true;
 
@@ -472,8 +475,8 @@ impl DarkIrc {
 
     /// Send a notification when there's a change in number of peers or the DAG sync status
     ///
-    /// The node is only borrowed to grab the signal, so no strong node reference
-    /// is held across the trigger below. Otherwise a notify racing `SceneNode::setup`'s
+    /// The node is only borrowed to grab the signal, so no strong node reference is
+    /// held across the trigger below. Otherwise a notify racing `SceneNode::setup`'s
     /// strong_count assertion would panic the app.
     pub async fn notify_connect(&self, peers_count: usize, is_dag_synced: bool) {
         let sig = {
@@ -481,6 +484,23 @@ impl DarkIrc {
             node.get_signal("connect").unwrap()
         };
         sig.trigger(serialize(&(peers_count as u32, is_dag_synced))).await;
+    }
+
+    /// Periodically log a p2p hostlist stats summary for diagnostics.
+    async fn relay_net_stats(me: &Weak<Self>) {
+        loop {
+            sleep(NET_STATS_INTERVAL).await;
+
+            let Some(self_) = me.upgrade() else { break };
+
+            let outbound_connections = self_.p2p.settings().read().await.outbound_connections;
+            i!(
+                "net stats: peers={} outbound_setting={outbound_connections} synced={} {}",
+                self_.p2p.peers_count(),
+                self_.event_graph.is_synced(),
+                self_.p2p.hosts().container.counts_string(),
+            );
+        }
     }
 
     /// Update the `outbound_peers` property with the outgoing connection slots addrs.
@@ -1065,6 +1085,9 @@ impl DarkIrc {
             }
         });
 
+        let me2 = Arc::downgrade(&self);
+        let net_stats_task = ex.spawn(async move { Self::relay_net_stats(&me2).await });
+
         let mut tasks = vec![
             send_method_task,
             setting_task,
@@ -1075,6 +1098,7 @@ impl DarkIrc {
             start_task,
             stop_task,
             screen_changed_task,
+            net_stats_task,
         ];
 
         if DNET_ENABLED {

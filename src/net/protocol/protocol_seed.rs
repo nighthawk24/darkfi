@@ -125,6 +125,9 @@ impl ProtocolBase for ProtocolSeed {
             max: getaddrs_max.unwrap_or(outbound_connections.min(u32::MAX as usize) as u32),
             transports,
         };
+        debug!(target: "net::protocol_seed::start",
+            "Sending GetAddrs(max={}, transports={:?}) to {}",
+            get_addr.max, get_addr.transports, self.channel.display_address());
         self.channel.send(&get_addr).await?;
 
         // Receive addresses
@@ -142,6 +145,8 @@ impl ProtocolBase for ProtocolSeed {
             self.hosts.insert(HostColor::Grey, &addrs_msg.addrs).await;
         }
 
+        debug!(target: "net::protocol_seed::start",
+            "Seed sync complete lists=[{}]", self.hosts.container.counts_string());
         debug!(target: "net::protocol_seed::start", "END => address={}", self.channel.display_address());
         Ok(())
     }
