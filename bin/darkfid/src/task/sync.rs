@@ -98,8 +98,15 @@ pub async fn sync_task(node: &DarkfiNodePtr, checkpoint: Option<(u32, HeaderHash
 
             // Retrieve all the headers backwards until our last known one and verify them.
             // We use the next height, in order to also retrieve the checkpoint header.
-            retrieve_headers(node, &common_tip_peers, last, checkpoint.0 + 1, timestamps_bound)
-                .await?;
+            retrieve_headers(
+                node,
+                &common_tip_peers,
+                last,
+                checkpoint.0 + 1,
+                Some(checkpoint.1),
+                timestamps_bound,
+            )
+            .await?;
 
             // Retrieve all the blocks for those headers and apply them to canonical
             last = retrieve_blocks(
@@ -126,8 +133,15 @@ pub async fn sync_task(node: &DarkfiNodePtr, checkpoint: Option<(u32, HeaderHash
 
         // Retrieve all the headers backwards until our last known one and verify them.
         // We use the next height, in order to also retrieve the peers tip header.
-        retrieve_headers(node, &common_tip_peers, last, common_tip_height + 1, timestamps_bound)
-            .await?;
+        retrieve_headers(
+            node,
+            &common_tip_peers,
+            last,
+            common_tip_height + 1,
+            None,
+            timestamps_bound,
+        )
+        .await?;
 
         // Retrieve all the blocks for those headers and apply them to canonical
         let last_received = retrieve_blocks(
@@ -317,6 +331,7 @@ async fn retrieve_headers(
     peers: &[ChannelPtr],
     last_known: (u32, HeaderHash),
     tip_height: u32,
+    checkpoint: Option<HeaderHash>,
     timestamps_bound: Timestamp,
 ) -> Result<()> {
     info!(target: "darkfid::task::sync::retrieve_headers", "Retrieving missing headers from peers...");
@@ -336,6 +351,69 @@ async fn retrieve_headers(
     let total = tip_height - last_known.0 - 1;
     let mut last_tip_height = tip_height;
     let validator = node.validator.read().await;
+
+    // If a checkpoint is provided, ensure its the tip of the first
+    // batch.
+    if let Some(checkpoint) = checkpoint {
+        for (index, peer) in peers.iter().enumerate() {
+            // Grab the response sub reference
+            let (peer_sub, failed) = &mut peer_subs[index];
+            let Some(ref response_sub) = peer_sub else {
+                continue;
+            };
+
+            // Node creates a `HeaderSyncRequest` and sends it
+            let request = HeaderSyncRequest { height: last_tip_height };
+            if let Err(e) = peer.send(&request).await {
+                debug!(target: "darkfid::task::sync::retrieve_headers", "Failure during `HeaderSyncRequest` send to peer {peer:?}: {e}");
+                *failed = true;
+                continue
+            };
+
+            let comms_timeout = node
+                .p2p_handler
+                .p2p
+                .settings()
+                .read_arc()
+                .await
+                .outbound_connect_timeout(peer.address().scheme());
+
+            // Node waits for response
+            let Ok(response) = response_sub.receive_with_timeout(comms_timeout).await else {
+                debug!(target: "darkfid::task::sync::retrieve_headers", "Timeout while waiting for `HeaderSyncResponse` from peer: {peer:?}");
+                *failed = true;
+                continue
+            };
+
+            // Ensure checkpoint is present
+            match response.headers.last() {
+                Some(last) => {
+                    if last.hash() != checkpoint {
+                        debug!(target: "darkfid::task::sync::retrieve_headers", "Checkpoint header missmatch from peer: {peer:?}");
+                        *failed = true;
+                        continue
+                    }
+                }
+                None => {
+                    debug!(target: "darkfid::task::sync::retrieve_headers", "Checkpoint header batch response is empty from peer: {peer:?}");
+                    *failed = true;
+                    continue
+                }
+            }
+
+            // Retain only the headers after our last known
+            let mut response_headers = response.headers.to_vec();
+            response_headers.retain(|h| h.height > last_known.0);
+
+            // Store the headers
+            validator.blockchain.headers.insert_sync(&response_headers)?;
+            last_tip_height = response_headers[0].height;
+            info!(target: "darkfid::task::sync::retrieve_headers", "Headers received: {}/{total}", validator.blockchain.headers.len_sync()?);
+            break
+        }
+    }
+
+    // Retrieve (rest) headers
     'headers_loop: loop {
         // Check if all our peers are failing
         let mut count = 0;
