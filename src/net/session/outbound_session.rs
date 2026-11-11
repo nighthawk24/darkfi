@@ -452,6 +452,20 @@ impl Slot {
                         "[P2P] Outbound slot #{slot} connection failed: {err}"
                     );
 
+                    // The Connector was stopped, which only happens during
+                    // P2P shutdown (Slot::stop() stops it first). Every
+                    // subsequent dial fails instantly, so retrying would
+                    // spin this loop without ever yielding, starving the
+                    // StoppableTask stop signal and blocking shutdown.
+                    // Slot::stop() emits the disconnect event for us.
+                    if matches!(err, Error::ConnectorStopped(_)) {
+                        self.channel_id.store(0, Ordering::Relaxed);
+
+                        addr_guard.disarm();
+
+                        return Ok(())
+                    }
+
                     dnetev!(self, OutboundSlotDisconnected, {
                         slot,
                         err: err.to_string()
@@ -564,12 +578,12 @@ impl Slot {
                 // should not result in hostlist modifications. The registry
                 // state is freed so the address is not stuck in `Connect`
                 // for the rest of the process lifetime.
-                if let Error::ConnectorStopped(message) = err {
+                if matches!(err, Error::ConnectorStopped(_)) {
                     if let Err(e) = self.p2p().hosts().unregister(&addr) {
                         verbose!(target: "net::outbound_session::try_connect",
                             "Error while unregistering addr={addr}, err={e}");
                     }
-                    return Err(Error::ConnectFailed(message));
+                    return Err(err);
                 }
 
                 // At this point we failed to connect. We'll downgrade this peer now.

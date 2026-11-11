@@ -22,8 +22,11 @@ use std::{
     collections::{HashMap, HashSet},
     net::TcpListener,
     panic,
-    sync::Arc,
-    time::Duration,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, UNIX_EPOCH},
 };
 
 use darkfi_serial::{async_trait, SerialDecodable, SerialEncodable};
@@ -925,4 +928,76 @@ async fn p2p_broadcasts_are_bounded_and_drained_real(ex: Arc<Executor<'static>>)
     ));
 
     server.stop().await;
+}
+
+/// Spawn a peer that accepts TCP connections but never performs the TLS
+/// handshake, keeping outbound dials against it pending. Accepted connection
+/// attempts are counted through `accepted`.
+async fn spawn_stalled_tls_peer(ex: Arc<Executor<'static>>, accepted: Arc<AtomicUsize>) -> Url {
+    let listener = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("tcp+tls://{}", listener.local_addr().unwrap())).unwrap();
+    ex.spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            accepted.fetch_add(1, Ordering::SeqCst);
+            held.push(stream);
+        }
+    })
+    .detach();
+    url
+}
+
+#[test]
+fn p2p_stop_terminates_outbound_slot_retry_spin() {
+    test_body!(p2p_stop_terminates_outbound_slot_retry_spin_real, 2);
+}
+
+async fn p2p_stop_terminates_outbound_slot_retry_spin_real(ex: Arc<Executor<'static>>) {
+    // Regression test: stopping the P2P network while an outbound slot had
+    // an in-flight dial used to send the slot run loop into an unstoppable
+    // retry spin (every subsequent dial failing instantly through the
+    // stopped connector). The spinning loop never yielded, so the slot's
+    // stop signal was starved, P2p::stop() hung forever, and dnet
+    // subscribers were flooded with reconnect events.
+
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let last_seen = UNIX_EPOCH.elapsed().unwrap().as_secs();
+    let mut greylist = vec![];
+    for _ in 0..2 {
+        greylist.push((spawn_stalled_tls_peer(ex.clone(), accepted.clone()).await, last_seen));
+    }
+
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "tcp+tls".to_string(),
+        NetworkProfile { outbound_connect_timeout: 10, ..Default::default() },
+    );
+
+    let settings = Settings {
+        localnet: true,
+        inbound_connections: 0,
+        outbound_connections: 1,
+        active_profiles: vec!["tcp+tls".to_string()],
+        profiles,
+        ..Default::default()
+    };
+
+    let p2p = P2p::new(settings, ex).await.unwrap();
+    p2p.hosts().insert(HostColor::Grey, &greylist).await;
+    p2p.clone().start().await.unwrap();
+
+    // Wait until the outbound slot is mid-dial against a stalled peer.
+    timeout(Duration::from_secs(5), async {
+        while accepted.load(Ordering::SeqCst) == 0 {
+            Timer::after(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("outbound slot never started dialing");
+
+    // Stopping must abort the pending dial and terminate the slot instead
+    // of spinning on instantly-failing reconnect attempts.
+    timeout(Duration::from_secs(10), p2p.stop())
+        .await
+        .expect("P2p::stop() hung: outbound slot kept retrying after connector stop");
 }
