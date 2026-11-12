@@ -16,7 +16,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::{future::Future, io, pin::Pin, time::Duration};
+use std::{future::Future, io, net::SocketAddr, pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use smol::io::{AsyncRead, AsyncWrite};
@@ -145,6 +145,36 @@ macro_rules! enforce_abspath {
             return Err(io::Error::from_raw_os_error(libc::ENETUNREACH))
         }
     };
+}
+
+/// Dial the resolved socket addresses in order and return the first
+/// successful stream. Hostnames can resolve to multiple address families
+/// (e.g. an AAAA record alongside an A record), and any single one of them
+/// can be unreachable from the local network, so every address is attempted
+/// before giving up. If all of them fail, the last error is returned.
+async fn dial_socket_addrs<T, F, Fut>(
+    addrs: Vec<SocketAddr>,
+    timeout: Option<Duration>,
+    mut dial: F,
+) -> io::Result<T>
+where
+    F: FnMut(SocketAddr, Option<Duration>) -> Fut,
+    Fut: Future<Output = io::Result<T>>,
+{
+    let mut last_err = None;
+
+    for addr in addrs {
+        match dial(addr, timeout).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                verbose!("[P2P] Failed dialing {addr}: {e}");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "No addresses to dial")))
 }
 
 impl Dialer {
@@ -282,15 +312,16 @@ impl Dialer {
     pub async fn dial(&self, timeout: Option<Duration>) -> io::Result<Box<dyn PtStream>> {
         match &self.variant {
             DialerVariant::Tcp(dialer) => {
-                // NOTE: sockaddr here is an array, can contain both ipv4 and ipv6
-                let sockaddr = self.endpoint.socket_addrs(|| None)?;
-                let stream = dialer.do_dial(sockaddr[0], timeout).await?;
+                let addrs = self.endpoint.socket_addrs(|| None)?;
+                let stream =
+                    dial_socket_addrs(addrs, timeout, |addr, t| dialer.do_dial(addr, t)).await?;
                 Ok(Box::new(stream))
             }
 
             DialerVariant::TcpTls(dialer) => {
-                let sockaddr = self.endpoint.socket_addrs(|| None)?;
-                let stream = dialer.do_dial(sockaddr[0], timeout).await?;
+                let addrs = self.endpoint.socket_addrs(|| None)?;
+                let stream =
+                    dial_socket_addrs(addrs, timeout, |addr, t| dialer.do_dial(addr, t)).await?;
                 let tlsupgrade = tls::TlsUpgrade::new(self.provide_tls_client_cert).await?;
                 let stream = tlsupgrade.upgrade_dialer_tls(stream).await?;
                 Ok(Box::new(stream))
@@ -350,8 +381,9 @@ impl Dialer {
 
             #[cfg(feature = "p2p-quic")]
             DialerVariant::Quic(dialer) => {
-                let sockaddr = self.endpoint.socket_addrs(|| None)?;
-                let stream = dialer.do_dial(sockaddr[0], timeout).await?;
+                let addrs = self.endpoint.socket_addrs(|| None)?;
+                let stream =
+                    dial_socket_addrs(addrs, timeout, |addr, t| dialer.do_dial(addr, t)).await?;
                 Ok(Box::new(stream))
             }
         }
