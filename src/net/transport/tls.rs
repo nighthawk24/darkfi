@@ -16,8 +16,12 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
+use futures::{
+    future::{select, Either},
+    pin_mut,
+};
 use futures_rustls::{
     rustls::{
         self,
@@ -30,6 +34,7 @@ use futures_rustls::{
     TlsAcceptor, TlsConnector, TlsStream,
 };
 use rcgen::string::Ia5String;
+use smol::Timer;
 use x509_parser::{
     parse_x509_certificate,
     prelude::{GeneralName, ParsedExtension, X509Certificate},
@@ -292,14 +297,35 @@ impl TlsUpgrade {
         Ok(Self { server_config, client_config })
     }
 
-    pub async fn upgrade_dialer_tls<IO>(self, stream: IO) -> io::Result<TlsStream<IO>>
+    /// Upgrade the given stream to a TLS connection. The handshake is raced
+    /// against the given timeout, since a peer can accept the underlying
+    /// connection but stall the handshake forever, which would otherwise
+    /// wedge the dialing slot indefinitely.
+    pub async fn upgrade_dialer_tls<IO>(
+        self,
+        stream: IO,
+        timeout: Option<Duration>,
+    ) -> io::Result<TlsStream<IO>>
     where
         IO: super::PtStream,
     {
         let server_name = ServerName::try_from(TLS_DNS_NAME).unwrap();
         let connector = TlsConnector::from(self.client_config);
-        let stream = connector.connect(server_name, stream).await?;
-        Ok(TlsStream::Client(stream))
+        let upgrade = connector.connect(server_name, stream);
+
+        match timeout {
+            Some(t) => {
+                let timer = Timer::after(t);
+                pin_mut!(upgrade);
+                pin_mut!(timer);
+
+                match select(upgrade, timer).await {
+                    Either::Left((result, _)) => Ok(TlsStream::Client(result?)),
+                    Either::Right((_, _)) => Err(io::ErrorKind::TimedOut.into()),
+                }
+            }
+            None => Ok(TlsStream::Client(upgrade.await?)),
+        }
     }
 
     // TODO: Try to find a transparent way for this instead of implementing

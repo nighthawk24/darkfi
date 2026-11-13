@@ -323,7 +323,7 @@ impl Dialer {
                 let stream =
                     dial_socket_addrs(addrs, timeout, |addr, t| dialer.do_dial(addr, t)).await?;
                 let tlsupgrade = tls::TlsUpgrade::new(self.provide_tls_client_cert).await?;
-                let stream = tlsupgrade.upgrade_dialer_tls(stream).await?;
+                let stream = tlsupgrade.upgrade_dialer_tls(stream, timeout).await?;
                 Ok(Box::new(stream))
             }
 
@@ -341,7 +341,7 @@ impl Dialer {
                 let port = self.endpoint.port().unwrap();
                 let stream = dialer.do_dial(host, port, timeout).await?;
                 let tlsupgrade = tls::TlsUpgrade::new(self.provide_tls_client_cert).await?;
-                let stream = tlsupgrade.upgrade_dialer_tls(stream).await?;
+                let stream = tlsupgrade.upgrade_dialer_tls(stream, timeout).await?;
                 Ok(Box::new(stream))
             }
 
@@ -375,7 +375,7 @@ impl Dialer {
             DialerVariant::Socks5Tls(dialer) => {
                 let stream = dialer.do_dial().await?;
                 let tlsupgrade = tls::TlsUpgrade::new(self.provide_tls_client_cert).await?;
-                let stream = tlsupgrade.upgrade_dialer_tls(stream).await?;
+                let stream = tlsupgrade.upgrade_dialer_tls(stream, timeout).await?;
                 Ok(Box::new(stream))
             }
 
