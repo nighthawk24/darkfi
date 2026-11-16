@@ -41,7 +41,10 @@ use crate::{
             archive_config, bounded_dag_store_config, init_logger, make_eg, make_eg_with_config,
             make_network, run_multi_node_test, shutdown_network, test_config, TestIdentity,
         },
-        util::{millis_until_next_rotation, next_hour_timestamp, next_rotation_timestamp},
+        util::{
+            millis_until_next_rotation, next_hour_timestamp, next_rotation_timestamp,
+            rotation_boundaries_to_catch_up, rotation_boundary_at, MAX_CATCHUP_ROTATIONS,
+        },
         DagStore, Event, EventGraphConfig, EventGraphPtr, LayerUTips, TimeIndex, NULL_ID,
         NULL_PARENTS, N_EVENT_PARENTS,
     },
@@ -280,6 +283,55 @@ fn evgr_rotation_helpers_are_total() {
     assert_eq!(next_rotation_timestamp(future_start, 1).unwrap(), future_start);
     assert!(millis_until_next_rotation(now.saturating_sub(1)).is_err());
     assert_eq!(super::util::hours_since(future_start).unwrap(), 0);
+}
+
+#[test]
+fn evgr_rotation_catch_up_after_wall_clock_jump() {
+    const INIT: u64 = 1_704_067_200_000;
+    const H: u64 = 3_600_000;
+
+    // Multiple missed hourly boundaries are returned in ascending order.
+    let now = INIT + 3 * H + 5 * 60_000;
+    let got = rotation_boundaries_to_catch_up(INIT, 1, INIT, now, Some(24)).unwrap();
+    assert_eq!(got, vec![INIT + H, INIT + 2 * H, INIT + 3 * H]);
+
+    // A single missed boundary.
+    let now = INIT + 2 * H + 1_000;
+    let got = rotation_boundaries_to_catch_up(INIT, 1, INIT + H, now, Some(24)).unwrap();
+    assert_eq!(got, vec![INIT + 2 * H]);
+
+    // Nothing to catch up: same boundary, now before previous, or now before
+    // the initial genesis.
+    assert!(rotation_boundaries_to_catch_up(INIT, 1, INIT + H, INIT + H, Some(24))
+        .unwrap()
+        .is_empty());
+    assert!(rotation_boundaries_to_catch_up(INIT, 1, INIT + H, INIT, Some(24)).unwrap().is_empty());
+    assert!(rotation_boundaries_to_catch_up(INIT, 1, INIT, INIT - H, Some(24)).unwrap().is_empty());
+
+    // Bounded mode keeps only the most recent `max_dags` boundaries.
+    let now = INIT + 10 * H + 1;
+    let got = rotation_boundaries_to_catch_up(INIT, 1, INIT, now, Some(3)).unwrap();
+    assert_eq!(got, vec![INIT + 8 * H, INIT + 9 * H, INIT + 10 * H]);
+
+    // Archival mode (None) is capped to MAX_CATCHUP_ROTATIONS boundaries.
+    let now = INIT + 200 * H + 1;
+    let got = rotation_boundaries_to_catch_up(INIT, 1, INIT, now, None).unwrap();
+    assert_eq!(got.len(), MAX_CATCHUP_ROTATIONS);
+    assert_eq!(got.first().copied(), Some(INIT + 33 * H));
+    assert_eq!(got.last().copied(), Some(INIT + 200 * H));
+
+    // Degenerate limits and invalid rotation periods.
+    assert!(rotation_boundaries_to_catch_up(INIT, 1, INIT, INIT + 10 * H, Some(0))
+        .unwrap()
+        .is_empty());
+    assert!(rotation_boundaries_to_catch_up(INIT, 0, INIT, INIT + H, Some(24)).is_err());
+
+    // Boundary computation honours multi-hour rotation periods.
+    assert_eq!(rotation_boundary_at(INIT, 6, INIT).unwrap(), INIT);
+    assert_eq!(rotation_boundary_at(INIT, 6, INIT + 13 * H).unwrap(), INIT + 12 * H);
+    assert_eq!(rotation_boundary_at(INIT, 6, INIT + 12 * H).unwrap(), INIT + 12 * H);
+    assert_eq!(rotation_boundary_at(INIT, 6, INIT - H).unwrap(), INIT);
+    assert!(rotation_boundary_at(INIT, 0, INIT).is_err());
 }
 
 #[test]

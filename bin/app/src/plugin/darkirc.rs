@@ -20,7 +20,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::Cursor,
     sync::{atomic::Ordering, Arc, OnceLock, Weak},
-    time::UNIX_EPOCH,
+    time::{Instant, UNIX_EPOCH},
 };
 
 use async_lock::RwLock;
@@ -35,7 +35,7 @@ use darkfi::{
         dnet::DnetEvent,
         session::SESSION_DEFAULT,
         settings::{MagicBytes, NetworkProfile, Settings as NetSettings},
-        ChannelPtr, P2p, P2pPtr,
+        P2p, P2pPtr,
     },
     system::{sleep, Subscription},
     Result as DarkFiResult,
@@ -75,6 +75,23 @@ const P2P_RETRY_TIME: u64 = 20;
 const COOLOFF_SLEEP_TIME: u64 = 20;
 const COOLOFF_SYNC_ATTEMPTS: usize = 6;
 const SYNC_MIN_PEERS: usize = 2;
+
+/// How often the resync watcher checks for a wall-clock jump caused by OS
+/// suspend/resume.
+const RESYNC_POLL_INTERVAL: u64 = 10;
+/// Wall-clock vs monotonic skew (ms) above which a suspend/resume is assumed.
+const SUSPEND_SKEW_THRESHOLD_MS: u64 = 5_000;
+
+/// Current UNIX timestamp in milliseconds.
+fn unix_timestamp_millis() -> u64 {
+    UNIX_EPOCH.elapsed().unwrap_or_default().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+/// Whether the wall clock advanced materially more than the monotonic clock,
+/// which indicates the process was suspended (e.g. OS sleep).
+fn resume_detected(wall_delta_ms: u64, monotonic_delta_ms: u64) -> bool {
+    wall_delta_ms > monotonic_delta_ms.saturating_add(SUSPEND_SKEW_THRESHOLD_MS)
+}
 
 /// Event graph rotation: `max_dags` hourly slots (`hours_rotation: 1`).
 const DAGS_COUNT: u64 = 24;
@@ -178,6 +195,9 @@ pub struct DarkIrc {
     app_db: AppDbPtr,
     dm_secret: SecretKey,
     ex: ExecutorPtr,
+    /// Coalescing trigger that wakes the DAG sync supervisor to resync.
+    resync_tx: async_channel::Sender<()>,
+    resync_rx: async_channel::Receiver<()>,
 }
 
 impl DarkIrc {
@@ -263,6 +283,8 @@ impl DarkIrc {
             nick.set(&mut PropertyAtomicGuard::none(), prev_nick);
         }
 
+        let (resync_tx, resync_rx) = async_channel::bounded(1);
+
         let self_ = Arc::new(Self {
             node: node.clone(),
             tasks: SyncMutex::new(vec![]),
@@ -281,6 +303,8 @@ impl DarkIrc {
             dm_secret,
 
             ex: ex.clone(),
+            resync_tx,
+            resync_rx,
         });
 
         self_.p2p.settings().write().await.outbound_connections = P2P_OUTBOUND_ACTIVE;
@@ -291,19 +315,26 @@ impl DarkIrc {
         Ok(Pimpl::DarkIrc(self_))
     }
 
-    async fn dag_sync(self: Arc<Self>, channel_sub: Subscription<DarkFiResult<ChannelPtr>>) {
-        i!("Waiting for some P2P connections...");
-
-        let mut sync_attempt = 0;
+    async fn dag_sync(self: Arc<Self>) {
         // TODO: these should be configurable
         let fast_mode = false;
-        let mut newest_synced = false;
-        loop {
-            let peers_count = self.p2p.peers_count();
-            self.notify_connect(peers_count, self.event_graph.is_synced()).await;
 
-            // Wait until we have enough connections
-            if peers_count < SYNC_MIN_PEERS {
+        loop {
+            // Drop triggers that accumulated while we were syncing.
+            while self.resync_rx.try_recv().is_ok() {}
+
+            let mut sync_attempt = 0;
+            let mut newest_synced = false;
+
+            // Wait until we have enough connections.
+            loop {
+                let peers_count = self.p2p.peers_count();
+                self.notify_connect(peers_count, self.event_graph.is_synced()).await;
+
+                if peers_count >= SYNC_MIN_PEERS {
+                    break
+                }
+
                 i!("Connected to {peers_count} peers. Waiting for more connections.");
                 let conn_sub = self.p2p.hosts().subscribe_channel().await;
                 loop {
@@ -318,75 +349,111 @@ impl DarkIrc {
                 }
             }
 
-            i!("Got peer connection");
-            sync_attempt += 1;
-            // Cool off periodically
-            if sync_attempt > COOLOFF_SYNC_ATTEMPTS {
-                i!("Wasn't able to sync yet. Cooling off for {COOLOFF_SLEEP_TIME} then will try again.");
-                sleep(COOLOFF_SLEEP_TIME).await;
-                sync_attempt = 0;
+            // Clear triggers that arrived while waiting for peers; phase 1 is
+            // about to resync everything anyway.
+            while self.resync_rx.try_recv().is_ok() {}
+
+            // Phase 1: sync the static DAG and the newest rotating DAG. A
+            // transient failure (e.g. right after resume) must not tear down
+            // the p2p stack: `static_sync` is idempotent, so retry instead.
+            loop {
+                i!("Got peer connection");
+                sync_attempt += 1;
+                // Cool off periodically
+                if sync_attempt > COOLOFF_SYNC_ATTEMPTS {
+                    i!("Wasn't able to sync yet. Cooling off for {COOLOFF_SLEEP_TIME} then will try again.");
+                    sleep(COOLOFF_SLEEP_TIME).await;
+                    sync_attempt = 0;
+                }
+
+                i!("Syncing static DAG");
+                match self.event_graph.static_sync().await {
+                    Ok(()) => {
+                        i!("Static synced successfully");
+                    }
+                    Err(e) => {
+                        e!("Failed syncing static graph: {e}, retrying in {COOLOFF_SLEEP_TIME}s...");
+                        sleep(COOLOFF_SLEEP_TIME).await;
+                        if self.p2p.peers_count() < SYNC_MIN_PEERS {
+                            break
+                        }
+                        continue
+                    }
+                }
+
+                // Sync only the newest DAG first. Older DAGs are caught up by
+                // `catch_up_sync`, so the `synced` flag (and the `connect`
+                // notification) is reached after the first DAG instead of
+                // after all `DAGS_COUNT` of them.
+                let latest_ts = self.event_graph.current_genesis.read().await.header.timestamp;
+                i!("Syncing newest event DAG ({latest_ts}) (attempt #{sync_attempt})");
+                match self.sync_dag_slot(latest_ts, fast_mode).await {
+                    Ok(()) => {
+                        i!(
+                            "Newest event DAG synced successfully ({} mode)",
+                            if fast_mode { "fast" } else { "full" },
+                        );
+                        newest_synced = true;
+                        break
+                    }
+                    Err(e) => {
+                        e!("Failed syncing newest DAG ({e}), retrying...");
+                        sleep(COOLOFF_SLEEP_TIME).await;
+                        if self.p2p.peers_count() < SYNC_MIN_PEERS {
+                            break
+                        }
+                    }
+                }
             }
 
-            i!("Syncing static DAG");
-            match self.event_graph.static_sync().await {
-                Ok(()) => {
-                    i!("Static synced successfully");
-                    // log_memory("after static sync");
-                }
-                Err(e) => {
-                    e!("Failed syncing static graph: {e}");
-                    self.p2p.stop().await;
-                    break
-                }
-            }
-            // Sync only the newest DAG first. Older DAGs are caught up in
-            // the background by `catch_up_sync`, so the `synced` flag (and
-            // the `connect` notification) is reached after the first DAG
-            // instead of after all `DAGS_COUNT` of them.
-            let latest_ts = self.event_graph.current_genesis.read().await.header.timestamp;
-            i!("Syncing newest event DAG ({latest_ts}) (attempt #{sync_attempt})");
-            let sync_result = self.sync_dag_slot(latest_ts, fast_mode).await;
-            match sync_result {
-                Ok(()) => {
-                    i!(
-                        "Newest event DAG synced successfully ({} mode)",
-                        if fast_mode { "fast" } else { "full" },
-                    );
-                    newest_synced = true;
-                    break
-                }
-                Err(e) => {
-                    // TODO: Maybe at this point we should prune or something?
-                    // TODO: Or maybe just tell the user to delete the DAG from FS.
-                    e!("Failed syncing newest DAG ({e}), retrying...");
-                }
-            }
-        }
-
-        // The newest DAG is synced: flip the `synced` flag so live `EventPut`
-        // ingestion and the netstatus UI unblock, then let the remaining older
-        // DAGs catch up in the background.
-        if newest_synced {
-            self.event_graph.synced.store(true, Ordering::Release);
-            i!("Marked event graph as synced (newest DAG done)");
-
-            let self_ = self.clone();
-            let catch_up_task =
-                self.ex.clone().spawn(async move { self_.catch_up_sync(fast_mode).await });
-            self.tasks.lock().push(catch_up_task);
-        }
-
-        let peers_count = self.p2p.peers_count();
-        self.notify_connect(peers_count, self.event_graph.is_synced()).await;
-
-        // Initial sync finished. Now just notify of connection changes
-        loop {
-            // Wait for a channel
-            if let Err(err) = channel_sub.receive().await {
-                w!("There was an error listening for channels. The service closed unexpectedly with error: {err}");
+            if !newest_synced {
+                // Peers went away while retrying; wait for new connections.
                 continue
             }
 
+            // The newest DAG is synced: flip the `synced` flag so live
+            // `EventPut` ingestion and the netstatus UI unblock, then catch up
+            // the remaining older DAGs.
+            self.event_graph.synced.store(true, Ordering::Release);
+            i!("Marked event graph as synced (newest DAG done)");
+
+            let peers_count = self.p2p.peers_count();
+            self.notify_connect(peers_count, self.event_graph.is_synced()).await;
+
+            self.clone().catch_up_sync(fast_mode).await;
+
+            let peers_count = self.p2p.peers_count();
+            self.notify_connect(peers_count, self.event_graph.is_synced()).await;
+
+            // Wait for a reason to resync: p2p disconnect or an OS
+            // suspend/resume wall-clock jump. Poll periodically as well so a
+            // peer loss without a disconnect event is still noticed.
+            loop {
+                let resync_rx = self.resync_rx.clone();
+                let trigger = async move { resync_rx.recv().await.ok().map(|_| true) };
+                let poll = async {
+                    sleep(RESYNC_POLL_INTERVAL).await;
+                    Some(false)
+                };
+                match smol::future::or(trigger, poll).await {
+                    Some(true) => {
+                        i!("Resync triggered; restarting DAG sync");
+                        break
+                    }
+                    Some(false) => {
+                        if self.p2p.peers_count() < SYNC_MIN_PEERS {
+                            i!("Peers dropped below sync threshold; restarting DAG sync");
+                            break
+                        }
+                    }
+                    None => {
+                        i!("Resync trigger channel closed; stopping DAG sync task");
+                        return
+                    }
+                }
+            }
+
+            self.event_graph.synced.store(false, Ordering::Release);
             let peers_count = self.p2p.peers_count();
             self.notify_connect(peers_count, self.event_graph.is_synced()).await;
         }
@@ -422,6 +489,15 @@ impl DarkIrc {
             (1..DAGS_COUNT).map(|i| last_newest.saturating_sub(i * HOUR_MS)).collect();
 
         loop {
+            // Abort early when a resync was requested (disconnect or suspend)
+            // or when peers were lost. The supervisor restarts the sync from
+            // the newest DAG, which is cheaper than finishing a stale catch-up
+            // walk.
+            if self.resync_rx.is_full() || self.p2p.peers_count() < SYNC_MIN_PEERS {
+                i!("Aborting background catch-up; resync requested or peers lost");
+                return
+            }
+
             // Re-read `current_genesis` before each retry round: rotation may
             // have shifted the newest slot or dropped a pending slot.
             let latest_ts = self.event_graph.current_genesis.read().await.header.timestamp;
@@ -448,6 +524,11 @@ impl DarkIrc {
             let horizon = latest_ts.saturating_sub((DAGS_COUNT - 1) * HOUR_MS);
             let mut still_pending = Vec::new();
             for dag_ts in pending.iter().copied() {
+                if self.resync_rx.is_full() || self.p2p.peers_count() < SYNC_MIN_PEERS {
+                    i!("Aborting background catch-up; resync requested or peers lost");
+                    return
+                }
+
                 if dag_ts < horizon {
                     i!("Skipping rotated-out DAG ({dag_ts})");
                     continue
@@ -916,6 +997,7 @@ impl DarkIrc {
 
             let peers_count = self.p2p.peers_count();
             self.notify_connect(peers_count, self.event_graph.is_synced()).await;
+            let _ = self.resync_tx.try_send(());
         }
 
         i!("P2P transport restart completed");
@@ -933,6 +1015,7 @@ impl DarkIrc {
 
         let peers_count = self.p2p.peers_count();
         self.notify_connect(peers_count, self.event_graph.is_synced()).await;
+        let _ = self.resync_tx.try_send(());
 
         i!("P2P start completed");
     }
@@ -1037,8 +1120,68 @@ impl DarkIrc {
         let ev_task = ex.spawn(self.clone().relay_events(ev_sub));
 
         // Sync the DAG / check sync status
+        let dag_task = ex.spawn(self.clone().dag_sync());
+
+        // Notify the UI whenever a new channel connects. This used to live in
+        // `dag_sync`, but the sync supervisor now blocks on resync triggers, so
+        // keep connection notifications independent.
         let channel_sub = self.p2p.hosts().subscribe_channel().await;
-        let dag_task = ex.spawn(self.clone().dag_sync(channel_sub));
+        let me2 = Arc::downgrade(&self);
+        let connect_task = ex.spawn(async move {
+            loop {
+                if let Err(err) = channel_sub.receive().await {
+                    w!("There was an error listening for channels. The service closed unexpectedly with error: {err}");
+                    continue
+                }
+
+                let Some(self_) = me2.upgrade() else { break };
+                let peers_count = self_.p2p.peers_count();
+                self_.notify_connect(peers_count, self_.event_graph.is_synced()).await;
+            }
+        });
+
+        // Request a resync when the wall clock jumps ahead of the monotonic
+        // clock (the process was suspended). Normal DAG rotation is handled by
+        // live `EventPut` ingestion and is not a resync trigger.
+        let me2 = Arc::downgrade(&self);
+        let resync_watch_task = ex.spawn(async move {
+            let mut last_wall = unix_timestamp_millis();
+            let mut last_instant = Instant::now();
+            loop {
+                sleep(RESYNC_POLL_INTERVAL).await;
+                let Some(self_) = me2.upgrade() else { break };
+
+                let now_wall = unix_timestamp_millis();
+                let now_instant = Instant::now();
+                let wall_delta = now_wall.saturating_sub(last_wall);
+                let monotonic_delta: u64 =
+                    now_instant.duration_since(last_instant).as_millis().try_into().unwrap_or(u64::MAX);
+                last_wall = now_wall;
+                last_instant = now_instant;
+
+                if resume_detected(wall_delta, monotonic_delta) {
+                    i!("Suspend/resume detected (wall {wall_delta}ms, monotonic {monotonic_delta}ms); requesting resync");
+                } else {
+                    continue
+                }
+
+                let _ = self_.resync_tx.try_send(());
+            }
+        });
+
+        // Request a resync whenever a peer disconnects, so we reconnect to the
+        // DAG tip rather than staying on a stale view.
+        let disconnect_sub = self.p2p.hosts().subscribe_disconnect().await;
+        let me2 = Arc::downgrade(&self);
+        let disconnect_watch_task = ex.spawn(async move {
+            loop {
+                let err = disconnect_sub.receive().await;
+
+                let Some(self_) = me2.upgrade() else { break };
+                i!("Peer disconnected ({err}); requesting DAG resync");
+                let _ = self_.resync_tx.try_send(());
+            }
+        });
 
         let window_node = sg_root.lookup_node("/window").unwrap();
 
@@ -1095,6 +1238,9 @@ impl DarkIrc {
             rescan_method_task,
             ev_task,
             dag_task,
+            connect_task,
+            resync_watch_task,
+            disconnect_watch_task,
             start_task,
             stop_task,
             screen_changed_task,
@@ -1234,4 +1380,19 @@ pub fn msg_id(privmsg: &Privmsg, timest: u64) -> MessageId {
     privmsg.nick.encode(&mut hasher).unwrap();
     privmsg.msg.encode(&mut hasher).unwrap();
     MessageId(hasher.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resume_detected;
+
+    #[test]
+    fn detects_suspend_from_wall_clock_skew() {
+        // Normal polling: wall and monotonic clocks advance together.
+        assert!(!resume_detected(10_000, 10_000));
+        // Small jitter is tolerated.
+        assert!(!resume_detected(10_000, 6_000));
+        // After a suspend, the wall clock jumps far ahead of the monotonic one.
+        assert!(resume_detected(3_600_000, 10_000));
+    }
 }

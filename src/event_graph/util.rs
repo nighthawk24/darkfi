@@ -47,6 +47,11 @@ use crate::rpc::{
 /// Milliseconds in one hour.
 pub(super) const HOUR_MS: u64 = 3_600_000;
 
+/// Hard cap on catch-up rotations for archival nodes (`max_dags == None`):
+/// 168 boundaries = 1 week. Prevents synthesizing an unbounded number of
+/// DAG slots after a long suspend.
+pub(super) const MAX_CATCHUP_ROTATIONS: usize = 168;
+
 /// Current UNIX timestamp in milliseconds.
 pub(super) fn unix_timestamp_millis() -> Result<u64> {
     let elapsed = UNIX_EPOCH
@@ -110,6 +115,95 @@ pub fn millis_until_next_rotation(next_rotation: u64) -> Result<u64> {
     next_rotation
         .checked_sub(now)
         .ok_or_else(|| Error::Custom("event graph next rotation is in the past".into()))
+}
+
+/// Most recent rotation boundary `<= now_ms` on the grid
+/// `initial_genesis + k * rotation_hours`.
+///
+/// Returns `initial_genesis` when `now_ms <= initial_genesis`.
+pub(super) fn rotation_boundary_at(
+    initial_genesis: u64,
+    rotation_hours: u64,
+    now_ms: u64,
+) -> Result<u64> {
+    if rotation_hours == 0 {
+        return Err(Error::Custom("event graph rotation period cannot be 0".into()))
+    }
+
+    let rotation_ms = rotation_hours.checked_mul(HOUR_MS).ok_or_else(|| {
+        Error::Custom("event graph rotation period overflows milliseconds".into())
+    })?;
+
+    if now_ms <= initial_genesis {
+        return Ok(initial_genesis)
+    }
+
+    let periods = (now_ms - initial_genesis) / rotation_ms;
+    let offset = periods
+        .checked_mul(rotation_ms)
+        .ok_or_else(|| Error::Custom("event graph rotation offset overflowed".into()))?;
+
+    initial_genesis
+        .checked_add(offset)
+        .ok_or_else(|| Error::Custom("event graph rotation boundary overflowed".into()))
+}
+
+/// Rotation boundaries in `(prev_boundary, now_ms]` that must be created
+/// after a wall-clock jump (e.g. OS suspend/resume).
+///
+/// `max_dags == Some(n)` keeps only the most recent `n` boundaries; `None`
+/// (archival mode) keeps the most recent [`MAX_CATCHUP_ROTATIONS`]. This
+/// prevents an unbounded synthesis loop while still guaranteeing that
+/// `current_genesis` and the local retention window are restored.
+///
+/// Returns an empty vector when there is nothing to catch up.
+pub(super) fn rotation_boundaries_to_catch_up(
+    initial_genesis: u64,
+    rotation_hours: u64,
+    prev_boundary: u64,
+    now_ms: u64,
+    max_dags: Option<usize>,
+) -> Result<Vec<u64>> {
+    if rotation_hours == 0 {
+        return Err(Error::Custom("event graph rotation period cannot be 0".into()))
+    }
+
+    let rotation_ms = rotation_hours.checked_mul(HOUR_MS).ok_or_else(|| {
+        Error::Custom("event graph rotation period overflows milliseconds".into())
+    })?;
+
+    let current = rotation_boundary_at(initial_genesis, rotation_hours, now_ms)?;
+    if current <= prev_boundary {
+        return Ok(Vec::new())
+    }
+
+    let limit = match max_dags {
+        Some(0) => return Ok(Vec::new()),
+        Some(n) => n,
+        None => MAX_CATCHUP_ROTATIONS,
+    };
+    let limit = u64::try_from(limit)
+        .map_err(|_| Error::Custom("event graph catch-up limit exceeds u64".into()))?;
+    let window = limit
+        .saturating_sub(1)
+        .checked_mul(rotation_ms)
+        .ok_or_else(|| Error::Custom("event graph catch-up window overflowed".into()))?;
+
+    let start = prev_boundary
+        .checked_add(rotation_ms)
+        .ok_or_else(|| Error::Custom("event graph rotation boundary overflowed".into()))?
+        .max(current.saturating_sub(window));
+
+    let mut boundaries = Vec::new();
+    let mut ts = start;
+    while ts <= current {
+        boundaries.push(ts);
+        ts = ts
+            .checked_add(rotation_ms)
+            .ok_or_else(|| Error::Custom("event graph rotation boundary overflowed".into()))?;
+    }
+
+    Ok(boundaries)
 }
 
 /// Generate the deterministic genesis event for the current rotation

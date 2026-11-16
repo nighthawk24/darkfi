@@ -876,9 +876,13 @@ async fn sync_task(
                     log_memory("after static sync");
                 }
                 Err(e) => {
-                    error!("Failed syncing static graph: {e}");
-                    p2p.stop().await;
-                    return Err(Error::StaticDagSyncFailed)
+                    // A transient failure (e.g. right after resume) must not
+                    // tear down the p2p stack permanently: `p2p.stop()` has no
+                    // restart path, so retry instead. `static_sync` is
+                    // idempotent, so re-running it is safe.
+                    error!("Failed syncing static graph: {e}, retrying in {comms_timeout}s...");
+                    sleep(comms_timeout).await;
+                    continue
                 }
             }
             info!("Syncing event DAG");

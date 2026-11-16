@@ -42,6 +42,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 use crate::{
+    event_graph::util::{rotation_boundaries_to_catch_up, unix_timestamp_millis},
     net::{channel::Channel, P2pPtr},
     system::{msleep, Publisher, PublisherPtr, StoppableTask, StoppableTaskPtr, Subscription},
     util::memory::log_memory,
@@ -2146,18 +2147,37 @@ impl EventGraph {
                 if remaining_ms == 0 {
                     break
                 }
+                // Sleep in short chunks so a resume from OS suspend is noticed
+                // within 10s even though `smol::Timer` uses a monotonic clock.
                 msleep(remaining_ms.min(10_000)).await;
             }
 
-            let hdr = Header {
-                timestamp: next,
-                parents: NULL_PARENTS,
-                layer: 0,
-                content_hash: blake3::hash(&self.config.genesis_contents),
-            };
-            let genesis = Event { header: hdr, content: self.config.genesis_contents.clone() };
+            // The wall clock may have jumped past one or more rotation
+            // boundaries while we were suspended (monotonic time paused).
+            // Recompute from the actual wall clock and create every missed
+            // DAG up to the current boundary so `current_genesis` and the
+            // local retention window stay consistent with reality.
+            let now = unix_timestamp_millis()?;
+            let prev = self.current_genesis.read().await.header.timestamp;
+            let boundaries = rotation_boundaries_to_catch_up(
+                self.config.initial_genesis,
+                self.config.hours_rotation,
+                prev,
+                now,
+                self.config.max_dags,
+            )?;
 
-            self.dag_prune(genesis).await?;
+            for ts in boundaries {
+                let hdr = Header {
+                    timestamp: ts,
+                    parents: NULL_PARENTS,
+                    layer: 0,
+                    content_hash: blake3::hash(&self.config.genesis_contents),
+                };
+                let genesis = Event { header: hdr, content: self.config.genesis_contents.clone() };
+
+                self.dag_prune(genesis).await?;
+            }
         }
     }
 
