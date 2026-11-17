@@ -104,8 +104,8 @@ impl FileSequence {
     /// the size of the previous files.
     pub fn get_file_position(&self, file_index: usize) -> u64 {
         let mut pos = 0;
-        for i in 0..file_index {
-            pos += self.files[i].1;
+        for file in &self.files[..file_index] {
+            pos += file.1;
         }
         pos
     }

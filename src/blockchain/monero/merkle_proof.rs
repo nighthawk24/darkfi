@@ -139,10 +139,7 @@ impl MerkleProof {
     /// This tests that the given proof is for the leftmost branch in
     /// the Merkle tree.
     pub fn check_coinbase_path(&self) -> bool {
-        if self.path_bitmap == 0b00000000 {
-            return true;
-        }
-        false
+        self.path_bitmap == 0b00000000
     }
 
     /// Calculates the Merkle root hash from the provided Monero hash

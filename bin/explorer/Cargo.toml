@@ -30,3 +30,7 @@ tapes = {git = "https://github.com/Cuprate/Tapes"}
 bytemuck = {version = "1.25.0", features = ["derive"]}
 
 arg = {git = "https://github.com/parazyd/arg"}
+
+# Inherit top-level workspace lints
+[lints]
+workspace = true

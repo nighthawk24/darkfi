@@ -212,13 +212,8 @@ impl Event {
 
         let Ok(now) = unix_timestamp_millis() else { return false };
 
-        if self.header.timestamp < now.saturating_sub(EVENT_TIME_DRIFT) ||
-            self.header.timestamp > now.saturating_add(EVENT_TIME_DRIFT)
-        {
-            return false
-        }
-
-        true
+        !(self.header.timestamp < now.saturating_sub(EVENT_TIME_DRIFT) ||
+            self.header.timestamp > now.saturating_add(EVENT_TIME_DRIFT))
     }
 
     /// Quick validation for static-DAG events.

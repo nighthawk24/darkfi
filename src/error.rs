@@ -487,8 +487,8 @@ pub enum Error {
     #[error("IO error: {0}")]
     Io(std::io::ErrorKind),
 
-    #[error("Infallible error: {0}")]
-    InfallibleError(String),
+    #[error("Infallible error")]
+    InfallibleError,
 
     #[cfg(feature = "smol")]
     #[error("async_channel sender error: {0}")]
@@ -718,14 +718,14 @@ impl From<std::time::SystemTimeError> for Error {
 }
 
 impl From<std::convert::Infallible> for Error {
-    fn from(err: std::convert::Infallible) -> Self {
-        Self::InfallibleError(err.to_string())
+    fn from(_: std::convert::Infallible) -> Self {
+        Self::InfallibleError
     }
 }
 
 impl From<()> for Error {
     fn from(_err: ()) -> Self {
-        Self::InfallibleError("Infallible".into())
+        Self::InfallibleError
     }
 }
 
