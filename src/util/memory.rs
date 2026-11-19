@@ -113,7 +113,7 @@ fn parse_status_kib(status: &str, key: &str) -> Option<u64> {
     })
 }
 
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 fn apple_rusage_info() -> Option<libc::rusage_info_v4> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v4>::uninit();
     let ret = unsafe {
@@ -129,6 +129,11 @@ fn apple_rusage_info() -> Option<libc::rusage_info_v4> {
     } else {
         None
     }
+}
+
+#[cfg(target_os = "ios")]
+fn apple_rusage_info() -> Option<libc::rusage_info_v4> {
+    None
 }
 
 #[cfg(unix)]
