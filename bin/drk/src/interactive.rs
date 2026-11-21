@@ -1239,7 +1239,15 @@ async fn handle_transfer(drk: &DrkPtr, parts: &[&str], output: &mut Vec<String>)
     };
 
     match lock
-        .transfer(&amount, token_id, *rcpt.public_key(), spend_hook, user_data, half_split)
+        .transfer(
+            &amount,
+            token_id,
+            *rcpt.public_key(),
+            spend_hook,
+            user_data,
+            half_split,
+            Vec::new(),
+        )
         .await
     {
         Ok(t) => output.push(base64::encode(&serialize_async(&t).await)),

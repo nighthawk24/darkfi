@@ -103,6 +103,7 @@ pub fn make_transfer_call(
     burn_zkbin: ZkBinary,
     burn_pk: ProvingKey,
     half_split: bool,
+    recipient_memo: Vec<u8>,
 ) -> Result<(MoneyTransferParamsV1, TransferCallSecrets, Vec<OwnCoin>)> {
     debug!(target: "contract::money::client::transfer", "Building Money::TransferV1 contract call");
     if value == 0 {
@@ -132,7 +133,7 @@ pub fn make_transfer_call(
     }
 
     let mut inputs = vec![];
-    let mut outputs = vec![];
+    let mut paired: Vec<(TransferCallOutput, Vec<u8>)> = vec![];
 
     let (spent_coins, change_value) = select_coins(coins, value)?;
     if spent_coins.is_empty() {
@@ -158,50 +159,64 @@ pub fn make_transfer_call(
 
         // Add the first half, if its not zero
         if half != 0 {
-            outputs.push(TransferCallOutput {
+            paired.push((
+                TransferCallOutput {
+                    public_key: recipient,
+                    value: half,
+                    token_id,
+                    spend_hook: output_spend_hook.unwrap_or(FuncId::none()),
+                    user_data: output_user_data.unwrap_or(pallas::Base::ZERO),
+                    blind: Blind::random(&mut OsRng),
+                },
+                recipient_memo.clone(),
+            ));
+        }
+
+        // Append the remainder and add the second half
+        half += value % 2;
+        paired.push((
+            TransferCallOutput {
                 public_key: recipient,
                 value: half,
                 token_id,
                 spend_hook: output_spend_hook.unwrap_or(FuncId::none()),
                 user_data: output_user_data.unwrap_or(pallas::Base::ZERO),
                 blind: Blind::random(&mut OsRng),
-            });
-        }
-
-        // Append the remainder and add the second half
-        half += value % 2;
-        outputs.push(TransferCallOutput {
-            public_key: recipient,
-            value: half,
-            token_id,
-            spend_hook: output_spend_hook.unwrap_or(FuncId::none()),
-            user_data: output_user_data.unwrap_or(pallas::Base::ZERO),
-            blind: Blind::random(&mut OsRng),
-        });
+            },
+            recipient_memo.clone(),
+        ));
     } else {
-        outputs.push(TransferCallOutput {
-            public_key: recipient,
-            value,
-            token_id,
-            spend_hook: output_spend_hook.unwrap_or(FuncId::none()),
-            user_data: output_user_data.unwrap_or(pallas::Base::ZERO),
-            blind: Blind::random(&mut OsRng),
-        });
+        paired.push((
+            TransferCallOutput {
+                public_key: recipient,
+                value,
+                token_id,
+                spend_hook: output_spend_hook.unwrap_or(FuncId::none()),
+                user_data: output_user_data.unwrap_or(pallas::Base::ZERO),
+                blind: Blind::random(&mut OsRng),
+            },
+            recipient_memo.clone(),
+        ));
     }
 
     if change_value > 0 {
-        outputs.push(TransferCallOutput {
-            public_key: keypair.public,
-            value: change_value,
-            token_id,
-            spend_hook: FuncId::none(),
-            user_data: pallas::Base::ZERO,
-            blind: Blind::random(&mut OsRng),
-        });
+        paired.push((
+            TransferCallOutput {
+                public_key: keypair.public,
+                value: change_value,
+                token_id,
+                spend_hook: FuncId::none(),
+                user_data: pallas::Base::ZERO,
+                blind: Blind::random(&mut OsRng),
+            },
+            Vec::new(),
+        ));
     }
 
-    // Shuffle the outputs
-    outputs.shuffle(&mut OsRng);
+    // Shuffle outputs and their memos together. The memo is encrypted note
+    // payload; it is not part of the coin hash.
+    paired.shuffle(&mut OsRng);
+    let (outputs, output_memos): (Vec<_>, Vec<_>) = paired.into_iter().unzip();
 
     let xfer_builder = TransferCallBuilder {
         clear_inputs: vec![],
@@ -211,6 +226,7 @@ pub fn make_transfer_call(
         mint_pk,
         burn_zkbin,
         burn_pk,
+        output_memos,
     };
 
     let (params, secrets) = xfer_builder.build()?;

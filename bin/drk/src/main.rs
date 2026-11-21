@@ -1040,7 +1040,15 @@ async fn realmain(args: Args, ex: ExecutorPtr) -> Result<()> {
             };
 
             let tx = match drk
-                .transfer(&amount, token_id, *rcpt.public_key(), spend_hook, user_data, half_split)
+                .transfer(
+                    &amount,
+                    token_id,
+                    *rcpt.public_key(),
+                    spend_hook,
+                    user_data,
+                    half_split,
+                    Vec::new(),
+                )
                 .await
             {
                 Ok(t) => t,

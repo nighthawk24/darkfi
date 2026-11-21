@@ -1232,7 +1232,7 @@ impl DrkPlugin {
     ) -> DarkFiResult<Transaction> {
         let drk = self.drk.read().await;
 
-        drk.transfer(amount, token_id, recipient, None, None, false).await
+        drk.transfer(amount, token_id, recipient, None, None, false, Vec::new()).await
     }
 
     /// Build a transaction from a BuildTxRequest (called by background task)

@@ -65,6 +65,7 @@ impl TestHarness {
             burn_zkbin.clone(),
             burn_pk.clone(),
             half_split,
+            vec![],
         )?;
 
         // Encode the call

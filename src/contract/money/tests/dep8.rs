@@ -117,6 +117,7 @@ fn dep8() -> Result<()> {
             burn_zkbin.clone(),
             burn_pk.clone(),
             false,
+            vec![],
         )?;
 
         // The idea is to use this call's output to pay the tx fee.

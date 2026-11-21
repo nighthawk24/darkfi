@@ -131,6 +131,7 @@ impl TestHarness {
             mint_pk: mint_pk.clone(),
             burn_zkbin: burn_zkbin.clone(),
             burn_pk: burn_pk.clone(),
+            output_memos: vec![],
         };
 
         let (xfer_params, xfer_secrets) = xfer_builder.build()?;

@@ -54,6 +54,9 @@ pub struct TransferCallBuilder {
     pub burn_zkbin: ZkBinary,
     /// Proving key for the `Burn_V1` zk circuit
     pub burn_pk: ProvingKey,
+    /// Encrypted-note memo for each output, same order as `outputs`.
+    /// Empty means every note memo stays empty.
+    pub output_memos: Vec<Vec<u8>>,
 }
 
 pub struct TransferCallClearInput {
@@ -163,7 +166,7 @@ impl TransferCallBuilder {
                 coin_blind: output.blind,
                 value_blind,
                 token_blind,
-                memo: vec![],
+                memo: self.output_memos.get(i).cloned().unwrap_or_default(),
             };
 
             let encrypted_note = AeadEncryptedNote::encrypt(&note, &output.public_key, &mut OsRng)?;
