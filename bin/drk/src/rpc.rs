@@ -460,8 +460,32 @@ impl Drk {
             ));
             append_or_print(output, sender, print, buf).await;
 
-            // Already scanned last confirmed block
+            // Already scanned last confirmed block. Repair coins whose
+            // nullifiers were recorded without flipping is_spent.
             if height > last_height {
+                match self.drop_coins_with_recorded_nullifiers().await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        append_or_print(
+                            output,
+                            sender,
+                            print,
+                            vec![format!(
+                                "Marked {n} coins spent; their nullifiers are already recorded"
+                            )],
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        append_or_print(
+                            output,
+                            sender,
+                            print,
+                            vec![format!("Could not reconcile recorded nullifiers: {e}")],
+                        )
+                        .await;
+                    }
+                }
                 return Ok(())
             }
 

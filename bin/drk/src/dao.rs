@@ -2220,8 +2220,9 @@ impl Drk {
             FuncRef { contract_id: *DAO_CONTRACT_ID, func_code: DaoFunction::Exec as u8 }
                 .to_func_id();
         let dao_bulla = dao.bulla();
-        let dao_owncoins =
-            self.get_contract_token_coins(&token_id, &dao_spend_hook, &dao_bulla.inner()).await?;
+        let dao_owncoins = self
+            .spendable_contract_token_coins(&token_id, &dao_spend_hook, &dao_bulla.inner())
+            .await?;
         if dao_owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "[dao_propose_transfer] Did not find any {token_id} unspent coins owned by this DAO"
@@ -2399,7 +2400,7 @@ impl Drk {
             FuncRef { contract_id: *DAO_CONTRACT_ID, func_code: DaoFunction::Exec as u8 }
                 .to_func_id();
         let dao_owncoins = self
-            .get_contract_token_coins(
+            .spendable_contract_token_coins(
                 &proposal_coinattrs.token_id,
                 &dao_spend_hook,
                 &proposal.proposal.dao_bulla.inner(),
@@ -2421,7 +2422,7 @@ impl Drk {
         }
 
         // Fetch our own governance OwnCoins to see what our balance is
-        let gov_owncoins = self.get_token_coins(&dao.params.dao.gov_token_id).await?;
+        let gov_owncoins = self.spendable_token_coins(&dao.params.dao.gov_token_id).await?;
         if gov_owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "[dao_transfer_proposal_tx] Did not find any governance {} coins in wallet",
@@ -2574,7 +2575,7 @@ impl Drk {
         }
 
         // Fetch our own governance OwnCoins to see what our balance is
-        let gov_owncoins = self.get_token_coins(&dao.params.dao.gov_token_id).await?;
+        let gov_owncoins = self.spendable_token_coins(&dao.params.dao.gov_token_id).await?;
         if gov_owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "[dao_generic_proposal_tx] Did not find any governance {} coins in wallet",
@@ -2758,7 +2759,7 @@ impl Drk {
         }
 
         // Fetch our own governance OwnCoins to see what our balance is
-        let gov_owncoins = self.get_token_coins(&dao.params.dao.gov_token_id).await?;
+        let gov_owncoins = self.spendable_token_coins(&dao.params.dao.gov_token_id).await?;
         if gov_owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "[dao_vote] Did not find any governance {} coins in wallet",
@@ -2996,7 +2997,7 @@ impl Drk {
             FuncRef { contract_id: *DAO_CONTRACT_ID, func_code: DaoFunction::Exec as u8 }
                 .to_func_id();
         let dao_owncoins = self
-            .get_contract_token_coins(
+            .spendable_contract_token_coins(
                 &proposal_coinattrs.token_id,
                 &dao_spend_hook,
                 &proposal.proposal.dao_bulla.inner(),

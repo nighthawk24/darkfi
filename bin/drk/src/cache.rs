@@ -260,8 +260,11 @@ mod tests {
             &empty_nodes,
         );
 
-        // Verify database is empty
+        // Verify database is empty. An absent nullifier leaf is the empty
+        // leaf (zero), which is the same check the money contract uses
+        // before it reports "Duplicate nullifier".
         assert!(cache.money_smt.is_empty()?);
+        assert_eq!(smt.get_leaf(&pallas::Base::from(1)), pallas::Base::ZERO);
 
         let leaves = vec![
             (pallas::Base::from(1), pallas::Base::random(&mut OsRng)),
@@ -269,6 +272,9 @@ mod tests {
             (pallas::Base::from(3), pallas::Base::random(&mut OsRng)),
         ];
         smt.insert_batch(leaves.clone()).unwrap();
+        assert_ne!(smt.get_leaf(&leaves[0].0), pallas::Base::ZERO);
+        assert_eq!(smt.get_leaf(&leaves[0].0), leaves[0].1);
+        assert_eq!(smt.get_leaf(&pallas::Base::from(7)), pallas::Base::ZERO);
 
         let hash1 = leaves[0].1;
         let hash2 = leaves[1].1;

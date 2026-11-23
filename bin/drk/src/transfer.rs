@@ -49,7 +49,7 @@ impl Drk {
         recipient_memo: Vec<u8>,
     ) -> Result<Transaction> {
         // First get all unspent OwnCoins to see what our balance is
-        let owncoins = self.get_token_coins(&token_id).await?;
+        let owncoins = self.spendable_token_coins(&token_id).await?;
         if owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "Did not find any unspent coins with token ID: {token_id}"

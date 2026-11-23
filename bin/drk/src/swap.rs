@@ -81,7 +81,7 @@ impl Drk {
         user_data_recv: Option<pallas::Base>,
     ) -> Result<PartialSwapData> {
         // First get all unspent OwnCoins to see what our balance is
-        let owncoins = self.get_token_coins(&token_pair.0).await?;
+        let owncoins = self.spendable_token_coins(&token_pair.0).await?;
         if owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "Did not find any unspent coins with token ID: {}",
@@ -184,7 +184,7 @@ impl Drk {
     ) -> Result<Transaction> {
         // Our side of the tx in the pairs is the second half, so we try to find
         // an unspent coin like that in our wallet.
-        let owncoins = self.get_token_coins(&partial.token_pair.1).await?;
+        let owncoins = self.spendable_token_coins(&partial.token_pair.1).await?;
         if owncoins.is_empty() {
             return Err(Error::Custom(format!(
                 "Did not find any unspent coins with token ID: {}",

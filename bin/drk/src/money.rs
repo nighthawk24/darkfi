@@ -51,6 +51,7 @@ use darkfi_sdk::{
         keypair::{Address, Keypair, PublicKey, SecretKey, StandardAddress},
         note::AeadEncryptedNote,
         pasta_prelude::PrimeField,
+        smt::{PoseidonFp, EMPTY_NODES_FP},
         poseidon_hash, BaseBlind, FuncId, MerkleNode, MerkleTree, ScalarBlind, MONEY_CONTRACT_ID,
     },
     dark_tree::DarkLeaf,
@@ -62,7 +63,7 @@ use darkfi_serial::{
 };
 
 use crate::{
-    cache::CacheSmt,
+    cache::{CacheOverlay, CacheSmt, CacheSmtStorage, KVDB_MONEY_SMT_TREE},
     cli_util::kaching,
     convert_named_params,
     error::{WalletDbError, WalletDbResult},
@@ -483,6 +484,96 @@ impl Drk {
         }
 
         Ok(owncoins)
+    }
+
+    /// Open a read-only overlay of the wallet's Money nullifiers Sparse Merkle Tree.
+    fn money_nullifier_smt(&self) -> Result<CacheSmt> {
+        let overlay = CacheOverlay::new(&self.cache)?;
+        let store = CacheSmtStorage::new(overlay, KVDB_MONEY_SMT_TREE);
+        Ok(CacheSmt::new(store, PoseidonFp::new(), &EMPTY_NODES_FP))
+    }
+
+    /// Unspent coins of `token_id` that can still be spent.
+    ///
+    /// Coins stay `is_spent = 0` when a scanned spend wrote the nullifier into
+    /// the wallet SMT but did not match an in-memory coin. The contract then
+    /// rejects the oldest of those coins with `Duplicate nullifier` (0x6) and
+    /// `tx.calculate_fee` fails with JSON-RPC -32111. Drop them before
+    /// selection, filter in-memory against the SMT even if DB reconciliation
+    /// fails, and offer the newest coin first.
+    pub async fn spendable_token_coins(&self, token_id: &TokenId) -> Result<Vec<OwnCoin>> {
+        if let Err(e) = self.drop_coins_with_recorded_nullifiers().await {
+            tracing::warn!(
+                target: "drk::money",
+                "Could not drop coins whose nullifiers are already recorded: {e}"
+            );
+        }
+        let mut coins = self.get_token_coins(token_id).await?;
+        self.retain_unrecorded_coins(&mut coins)?;
+        coins.sort_by(|a, b| b.leaf_position.cmp(&a.leaf_position));
+        Ok(coins)
+    }
+
+    /// Unspent contract-owned coins that can still be spent.
+    pub async fn spendable_contract_token_coins(
+        &self,
+        token_id: &TokenId,
+        spend_hook: &FuncId,
+        user_data: &pallas::Base,
+    ) -> Result<Vec<OwnCoin>> {
+        if let Err(e) = self.drop_coins_with_recorded_nullifiers().await {
+            tracing::warn!(
+                target: "drk::money",
+                "Could not drop coins whose nullifiers are already recorded: {e}"
+            );
+        }
+        let mut coins = self.get_contract_token_coins(token_id, spend_hook, user_data).await?;
+        self.retain_unrecorded_coins(&mut coins)?;
+        coins.sort_by(|a, b| b.leaf_position.cmp(&a.leaf_position));
+        Ok(coins)
+    }
+
+    /// Remove any coin whose nullifier leaf is already occupied in the Money SMT.
+    fn retain_unrecorded_coins(&self, coins: &mut Vec<OwnCoin>) -> Result<()> {
+        if coins.is_empty() {
+            return Ok(())
+        }
+        let smt = self.money_nullifier_smt()?;
+        coins.retain(|coin| !nullifier_leaf_is_recorded(smt.get_leaf(&coin.nullifier().inner())));
+        Ok(())
+    }
+
+    /// Mark unspent coins spent when their nullifier leaf is already occupied.
+    ///
+    /// The money contract treats a non-zero nullifier leaf as spent
+    /// (`get_leaf(nullifier) != 0`). Returns how many wallet rows were updated.
+    pub async fn drop_coins_with_recorded_nullifiers(&self) -> Result<u32> {
+        let smt = self.money_nullifier_smt()?;
+        let unspent = self.get_coins(false).await?;
+        let mut owncoins_nullifiers = BTreeMap::new();
+        let mut nullifiers = Vec::new();
+        for coin in &unspent {
+            let nullifier = coin.0.nullifier();
+            if !nullifier_leaf_is_recorded(smt.get_leaf(&nullifier.inner())) {
+                continue
+            }
+            owncoins_nullifiers
+                .insert(nullifier.to_bytes(), (coin.0.coin.to_bytes(), coin.0.leaf_position));
+            nullifiers.push(nullifier);
+        }
+        let count = u32::try_from(nullifiers.len()).unwrap_or(u32::MAX);
+        if count == 0 {
+            return Ok(0)
+        }
+        self.mark_spent_coins(
+            None,
+            &owncoins_nullifiers,
+            &nullifiers,
+            &None,
+            "nullifier-already-recorded",
+        )
+        .await?;
+        Ok(count)
     }
 
     /// Fetch provided contract specified token unspend balances from the wallet.
@@ -1437,7 +1528,7 @@ impl Drk {
         {
             Some((coin, tree)) => (coin, tree, true),
             None => {
-                let mut coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
+                let mut coins = self.spendable_token_coins(&DARK_TOKEN_ID).await?;
                 coins.retain(|x| {
                     x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier())
                 });
@@ -1488,7 +1579,7 @@ impl Drk {
         {
             Some((coin, tree)) => (coin, tree, true),
             None => {
-                let mut coins = self.get_token_coins(&DARK_TOKEN_ID).await?;
+                let mut coins = self.spendable_token_coins(&DARK_TOKEN_ID).await?;
                 coins.retain(|x| {
                     x.note.value > required_fee && !spent_nullifiers.contains(&x.nullifier())
                 });
@@ -1598,5 +1689,146 @@ impl Drk {
         }
 
         None
+    }
+}
+
+/// A nullifier leaf is occupied when it is not the SMT empty leaf.
+/// The money contract uses the same comparison (`pallas::Base::ZERO`).
+pub(crate) fn nullifier_leaf_is_recorded(leaf: pallas::Base) -> bool {
+    leaf != pallas::Base::ZERO
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nullifier_leaf_is_recorded;
+    use crate::{
+        cache::{Cache, CacheOverlay, CacheSmt, CacheSmtStorage, KVDB_MONEY_SMT_TREE},
+        money::{
+            MONEY_COINS_COL_COIN, MONEY_COINS_COL_COIN_BLIND, MONEY_COINS_COL_CREATION_HEIGHT,
+            MONEY_COINS_COL_IS_SPENT, MONEY_COINS_COL_LEAF_POSITION, MONEY_COINS_COL_MEMO,
+            MONEY_COINS_COL_SECRET, MONEY_COINS_COL_SPEND_HOOK, MONEY_COINS_COL_SPENT_HEIGHT,
+            MONEY_COINS_COL_TOKEN_BLIND, MONEY_COINS_COL_TOKEN_ID, MONEY_COINS_COL_USER_DATA,
+            MONEY_COINS_COL_VALUE, MONEY_COINS_COL_VALUE_BLIND, MONEY_COINS_TABLE,
+        },
+        params,
+        walletdb::WalletDb,
+        Drk,
+    };
+    use darkfi::zk::halo2::Field;
+    use darkfi_money_contract::{
+        client::{MoneyNote, OwnCoin},
+        model::{Coin, DARK_TOKEN_ID},
+    };
+    use darkfi_sdk::{
+        bridgetree::Position,
+        crypto::{
+            keypair::Network,
+            smt::{PoseidonFp, EMPTY_NODES_FP},
+            BaseBlind, FuncId, ScalarBlind, SecretKey,
+        },
+        pasta::pallas,
+    };
+    use darkfi_serial::serialize;
+    use kvdb_overlay::Database;
+    use rand::rngs::OsRng;
+
+    #[test]
+    fn empty_nullifier_leaf_is_spendable_and_any_other_leaf_is_spent() {
+        assert!(!nullifier_leaf_is_recorded(pallas::Base::ZERO));
+        assert!(nullifier_leaf_is_recorded(pallas::Base::from(1)));
+    }
+
+    #[test]
+    fn spendable_token_coins_drops_recorded_nullifiers_and_orders_newest_first() {
+        smol::block_on(async {
+            let (kvdb, _kvdb_dir) = Database::open_temp().unwrap();
+            let cache = Cache::new(&kvdb).unwrap();
+            let wallet = WalletDb::new(None, None).await.unwrap();
+            let drk = Drk { network: Network::Testnet, cache, wallet, rpc_client: None, fun: false };
+            drk.initialize_wallet().await.unwrap();
+            drk.initialize_money(&mut Vec::new()).await.unwrap();
+
+            let secret = SecretKey::random(&mut OsRng);
+            let make_coin = |seed: u64, pos: u64, value: u64| OwnCoin {
+                coin: Coin::from(pallas::Base::from(seed)),
+                note: MoneyNote {
+                    value,
+                    token_id: *DARK_TOKEN_ID,
+                    spend_hook: FuncId::none(),
+                    user_data: pallas::Base::ZERO,
+                    coin_blind: BaseBlind::random(&mut OsRng),
+                    value_blind: ScalarBlind::random(&mut OsRng),
+                    token_blind: BaseBlind::random(&mut OsRng),
+                    memo: vec![],
+                },
+                secret,
+                leaf_position: Position::from(pos),
+            };
+
+            let spent_on_chain = make_coin(11, 1, 100_000_000);
+            let older_unspent = make_coin(22, 2, 200_000_000);
+            let newer_unspent = make_coin(33, 5, 300_000_000);
+
+            let insert_sql = format!(
+                "INSERT INTO {} ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);",
+                *MONEY_COINS_TABLE,
+                MONEY_COINS_COL_COIN,
+                MONEY_COINS_COL_VALUE,
+                MONEY_COINS_COL_TOKEN_ID,
+                MONEY_COINS_COL_SPEND_HOOK,
+                MONEY_COINS_COL_USER_DATA,
+                MONEY_COINS_COL_COIN_BLIND,
+                MONEY_COINS_COL_VALUE_BLIND,
+                MONEY_COINS_COL_TOKEN_BLIND,
+                MONEY_COINS_COL_SECRET,
+                MONEY_COINS_COL_LEAF_POSITION,
+                MONEY_COINS_COL_MEMO,
+                MONEY_COINS_COL_CREATION_HEIGHT,
+                MONEY_COINS_COL_IS_SPENT,
+                MONEY_COINS_COL_SPENT_HEIGHT,
+            );
+            let spent_height: Option<u32> = None;
+            for coin in [&spent_on_chain, &older_unspent, &newer_unspent] {
+                drk.wallet
+                    .exec_sql(
+                        &insert_sql,
+                        params![
+                            coin.coin.to_bytes().to_vec(),
+                            serialize(&coin.note.value),
+                            serialize(&coin.note.token_id),
+                            serialize(&coin.note.spend_hook),
+                            serialize(&coin.note.user_data),
+                            serialize(&coin.note.coin_blind),
+                            serialize(&coin.note.value_blind),
+                            serialize(&coin.note.token_blind),
+                            serialize(&coin.secret),
+                            serialize(&coin.leaf_position),
+                            serialize(&coin.note.memo),
+                            10u32,
+                            0,
+                            spent_height,
+                        ],
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // Record the oldest coin's nullifier in the SMT while leaving is_spent = 0.
+            let overlay = CacheOverlay::new(&drk.cache).unwrap();
+            let store = CacheSmtStorage::new(overlay, KVDB_MONEY_SMT_TREE);
+            let mut smt = CacheSmt::new(store, PoseidonFp::new(), &EMPTY_NODES_FP);
+            drk.smt_insert(&mut smt, &[spent_on_chain.nullifier()]).unwrap();
+            let diff = smt.store.overlay.0.diff(&[]).unwrap();
+            smt.store.overlay.0.apply_diff(&diff).unwrap();
+
+            let spendable = drk.spendable_token_coins(&DARK_TOKEN_ID).await.unwrap();
+            assert_eq!(spendable.len(), 2);
+            assert_eq!(spendable[0].coin, newer_unspent.coin);
+            assert_eq!(spendable[1].coin, older_unspent.coin);
+
+            // Second call sees 0 remaining stale rows because the coin was marked spent in SQLite.
+            assert_eq!(drk.drop_coins_with_recorded_nullifiers().await.unwrap(), 0);
+        });
     }
 }
